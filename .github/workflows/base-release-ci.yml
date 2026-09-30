@@ -1,0 +1,56 @@
+name: OrbitFS Base CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+
+concurrency:
+  group: orbitfs-base-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - name: Verify Base release artifact can be generated
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/build-customer-schema.mjs --schema-version 1 --output supabase/customer-schema.sql --metadata /tmp/orbitfs-database-schema.json
+          test -s supabase/customer-schema.sql
+          test "$(jq -r '.migrationCount' /tmp/orbitfs-database-schema.json)" -gt 0
+          test "$(jq -r '.sha256' /tmp/orbitfs-database-schema.json | wc -c)" -eq 65
+          cp supabase/customer-schema.sql /tmp/orbitfs-customer-schema.clean.sql
+          printf '\n-- stale-stage1-test\n' >> supabase/customer-schema.sql
+          if node tools/build-panel-release.mjs --version 0.0.0-ci --channel stable --commit "$GITHUB_SHA" --database-metadata /tmp/orbitfs-database-schema.json --output /tmp/orbitfs-base-stale.json.gz; then
+            echo "::error::Stage 1 accepted a stale customer database snapshot."
+            exit 1
+          fi
+          cp /tmp/orbitfs-customer-schema.clean.sql supabase/customer-schema.sql
+          node tools/build-panel-release.mjs --version 0.0.0-ci --channel stable --commit "$GITHUB_SHA" --database-metadata /tmp/orbitfs-database-schema.json --output /tmp/orbitfs-base-ci.json.gz
+          test -s /tmp/orbitfs-base-ci.json.gz
+          node -e "const fs=require('fs'),{gunzipSync}=require('zlib');const p=JSON.parse(gunzipSync(fs.readFileSync('/tmp/orbitfs-base-ci.json.gz'))),c=p.databaseMigrationChain;if(p.format!=='orbitfs-base-deployment-v2'||p.schemaVersion!==2||p.releaseChannel!=='stable'||!p.files?.length||p.databaseCompatibility?.mode!=='expand-contract'||p.databaseCompatibility?.migrationMode!=='forward-only'||p.databaseCompatibility?.automaticDestructiveMigrations!==false||p.rollbackPolicy?.databaseRollback!=='forward-only-no-down-migrations'||c?.format!=='orbitfs-base-migration-chain-v1'||c?.complete!==true||c?.baseline!==true||c?.migrationCount!==p.databaseMigrationCount||c?.rootMigration!==p.databaseMigrationRoot||c?.rootSha256!==p.databaseMigrationRootSha256||c?.latestMigration!==p.databaseLatestMigration||!Array.isArray(c?.migrations)||c.migrations.length!==p.databaseMigrationCount||p.database?.migrationChain?.rootMigration!==p.databaseMigrationRoot)process.exit(1)"
+      - name: Verify public License Master API contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          response_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' --request POST --header 'content-type: application/json' --header 'accept: application/json' --data '{"license_key":"LIC-AAAAAAAAAA-BBBBBBBBBB-CCCCCCCCCC","product":"orbitfs_base","component":"orbitfs_base","installation_id":"ci-contract-orbitfs-base"}' 'https://incendiarynetworks.cc/api/v1/license/validate')"
+          cat "$response_file"
+          if [ "$status" != "404" ] && [ "$status" != "403" ]; then
+            echo "Unexpected License Master validation status: $status"
+            exit 1
+          fi
+          updater_status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' 'https://incendiarynetworks.cc/api/v1/updater?product=orbitfs_base&channel=stable&type=update')"
+          cat "$response_file"
+          test "$updater_status" = "401"

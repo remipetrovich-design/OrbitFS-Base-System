@@ -1,0 +1,355 @@
+name: Build OrbitFS Base Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Base release version (for example 1.0.0, v1.0.0.0, v.1.0.0, B0.0.0, D.0.0.0)
+        required: true
+        type: string
+      source_sha:
+        description: Exact base-release commit to package
+        required: true
+        type: string
+      channel:
+        description: Base release channel
+        required: true
+        default: stable
+        type: string
+      notes:
+        description: Optional operator release notes
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: orbitfs-base-release-${{ inputs.version }}-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    outputs:
+      release_id: ${{ steps.master-release.outputs.id }}
+      license_master_url: ${{ steps.license-master.outputs.url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require base-release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_NAME" != "base-release" ]; then
+            echo "::error::Base release candidates may only be built from base-release."
+            exit 1
+          fi
+
+      - name: Checkout exact Base source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Verify Base source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA" || { echo "::error::Checked-out source does not match requested Base commit."; exit 1; }
+          git fetch origin base-release --prune
+          test "$(git rev-parse origin/base-release)" = "$SOURCE_SHA" || { echo "::error::base-release moved after selection. Inspect the new tip and run the release again."; exit 1; }
+
+      - name: Require release database tree to match current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main --prune
+          base_tree="$(git rev-parse "HEAD:supabase/migrations")"
+          main_tree="$(git rev-parse "origin/main:supabase/migrations")"
+          if [ "$base_tree" != "$main_tree" ]; then
+            echo "::error::base-release database migrations differ from main. Promote and validate main first."
+            git diff --name-status HEAD origin/main -- supabase/migrations || true
+            exit 1
+          fi
+          echo "Stage 1 Base database migrations match main at the inspected release commit."
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Production build
+        run: npm run build
+
+      - name: Build authoritative customer database snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/build-customer-schema.mjs \
+            --schema-version "${ORBITFS_SCHEMA_VERSION:-1}" \
+            --output supabase/customer-schema.sql \
+            --metadata orbitfs-database-schema.json
+          test -s supabase/customer-schema.sql
+          test -s orbitfs-database-schema.json
+
+      - name: Build Base deployment artifact
+        id: package
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CHANNEL: ${{ inputs.channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT="orbitfs-base-v${VERSION}.json.gz"
+          node tools/build-panel-release.mjs \
+            --version "$VERSION" \
+            --channel "$CHANNEL" \
+            --commit "$SOURCE_SHA" \
+            --database-metadata orbitfs-database-schema.json \
+            --output "$ARTIFACT"
+          test -s "$ARTIFACT"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Base deployment artifact
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ARTIFACT: ${{ steps.package.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs=require('fs'),crypto=require('crypto'),{gunzipSync}=require('node:zlib');
+          const artifact=process.env.ARTIFACT;
+          const pkg=JSON.parse(gunzipSync(fs.readFileSync(artifact)).toString('utf8'));
+          if(pkg.format!=='orbitfs-base-deployment-v2'||Number(pkg.schemaVersion)!==2)throw new Error('Invalid Base deployment package format');
+          if(pkg.version!==process.env.VERSION||pkg.sourceCommit!==process.env.SOURCE_SHA)throw new Error('Base package source/version mismatch');
+          if(!Array.isArray(pkg.components)||pkg.components.length!==1||pkg.components[0]!=='base')throw new Error('Base package components must be exactly [base]');
+          if(pkg.checkpointRequired!==false)throw new Error('Base package must not declare an update checkpoint requirement');
+          const lifecycle=pkg.releaseLifecycle;
+          if(!lifecycle||lifecycle.mode!=='single-current-per-channel'||lifecycle.onPublish!=='supersede-previous-published-base'||lifecycle.archiveSuperseded!==true||lifecycle.hideSupersededByDefault!==true||lifecycle.preserveRollbackHistory!==true)throw new Error('Base release lifecycle contract is invalid');
+          if(!pkg.projectSettings||pkg.projectSettings.framework!=='sveltekit'||pkg.projectSettings.buildCommand!=='npm run build'||pkg.projectSettings.installCommand!=='npm ci')throw new Error('Base Vercel project settings are invalid');
+          if(!Array.isArray(pkg.files)||!pkg.files.length||Number(pkg.fileCount)!==pkg.files.length)throw new Error('Base file list is invalid');
+          const seen=new Set();
+          for(const f of pkg.files){
+            if(!f?.file||seen.has(f.file)||f.encoding!=='base64'||typeof f.data!=='string')throw new Error('Invalid or duplicate Base file');
+            seen.add(f.file);
+            const data=Buffer.from(f.data,'base64');
+            const sha=crypto.createHash('sha256').update(data).digest('hex');
+            if(data.length!==Number(f.size)||sha!==String(f.sha256||'').toLowerCase())throw new Error('Base file integrity failure: '+f.file);
+          }
+          for(const required of ['package.json','svelte.config.js','tools/prepare-license-runtime.mjs','deployment/base-environment.json','supabase/customer-schema.sql']){
+            if(!seen.has(required))throw new Error('Missing required Base file: '+required);
+          }
+          if(!String(pkg.databaseSchemaVersion||'')||pkg.databaseSchemaPath!=='supabase/customer-schema.sql'||!/^[a-f0-9]{64}$/i.test(String(pkg.databaseSchemaSha256||'')))throw new Error('Base database snapshot metadata is invalid');
+          if(!Number.isInteger(Number(pkg.databaseMigrationCount))||Number(pkg.databaseMigrationCount)<1||!/^\d{14}$/.test(String(pkg.databaseLatestMigration||'')))throw new Error('Base migration metadata is invalid');
+          if(!Array.isArray(pkg.databaseMigrations)||pkg.databaseMigrations.length!==Number(pkg.databaseMigrationCount))throw new Error('Base database migration inventory is incomplete');
+          if(!/^\d{14}$/.test(String(pkg.databaseMigrationRoot||''))||!/^[a-f0-9]{64}$/i.test(String(pkg.databaseMigrationRootSha256||'')))throw new Error('Base database migration root is invalid');
+          const chain=pkg.databaseMigrationChain;
+          if(chain?.format!=='orbitfs-base-migration-chain-v1'||chain?.complete!==true||chain?.baseline!==true||Number(chain?.migrationCount)!==Number(pkg.databaseMigrationCount))throw new Error('Base database migration chain contract is incomplete');
+          if(String(chain.rootMigration)!==String(pkg.databaseMigrationRoot)||String(chain.rootSha256).toLowerCase()!==String(pkg.databaseMigrationRootSha256).toLowerCase()||String(chain.latestMigration)!==String(pkg.databaseLatestMigration))throw new Error('Base database migration chain metadata is inconsistent');
+          if(!Array.isArray(chain.migrations)||chain.migrations.length!==Number(pkg.databaseMigrationCount))throw new Error('Base database migration chain inventory is incomplete');
+          const first=pkg.databaseMigrations[0],last=pkg.databaseMigrations[pkg.databaseMigrations.length-1];
+          if(String(first?.id)!==String(pkg.databaseMigrationRoot)||String(first?.sha256).toLowerCase()!==String(pkg.databaseMigrationRootSha256).toLowerCase()||String(last?.id)!==String(pkg.databaseLatestMigration))throw new Error('Base database migration chain endpoints do not match the inventory');
+          const schema=pkg.files.find(f=>f.file===pkg.databaseSchemaPath);
+          if(schema.sha256!==String(pkg.databaseSchemaSha256).toLowerCase())throw new Error('Base schema checksum does not match packaged snapshot');
+          console.log('Base deployment artifact validated:',pkg.version,'files='+pkg.fileCount,'migrations='+pkg.databaseMigrationCount);
+          NODE
+
+      - name: Generate Base changelog
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          OPERATOR_NOTES: ${{ inputs.notes }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "# OrbitFS Base — v$VERSION"
+            echo
+            echo "**Release type:** Base"
+            echo
+            echo "**Source:** $GITHUB_REPOSITORY@base-release"
+            echo
+            echo "**Commit:** $SOURCE_SHA"
+            echo
+            echo "## Source"
+            git log -1 --format='- %s (%H)' "$SOURCE_SHA"
+            if [ -n "$OPERATOR_NOTES" ]; then
+              echo
+              echo "## Operator notes"
+              printf '%s\n' "$OPERATOR_NOTES"
+            fi
+            echo
+            echo "This candidate requires License Manager technical validation, manual approval and publication before any customer Base deployment may use it."
+          } > release-notes.md
+
+      - name: Normalize License Manager URL
+        id: license-master
+        env:
+          RAW_LICENSE_MASTER_URL: ${{ vars.LICENSE_MASTER_URL || 'https://incendiarynetworks.cc/api/v1' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          normalized="$(RAW_LICENSE_MASTER_URL="$RAW_LICENSE_MASTER_URL" node - <<'NODE'
+          const raw=String(process.env.RAW_LICENSE_MASTER_URL||'').trim();
+          const u=new URL(raw);
+          if(u.protocol!=='https:'||u.hostname!=='incendiarynetworks.cc'||u.search||u.hash)throw new Error('LICENSE_MASTER_URL must point to https://incendiarynetworks.cc');
+          let path=u.pathname.replace(/\/+$/,'');
+          if(path==='/api')path='/api/v1';
+          if(path!=='/api/v1')throw new Error('LICENSE_MASTER_URL path must be /api or /api/v1');
+          u.pathname=path;
+          process.stdout.write(u.toString().replace(/\/$/,''));
+          NODE
+          )"
+          echo "url=$normalized" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Base release channel
+        env:
+          LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
+          LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
+          CHANNEL: ${{ inputs.channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$LICENSE_MASTER_API_TOKEN" || { echo "::error::Missing LICENSE_MASTER_API_TOKEN repository secret."; exit 1; }
+          channels="$(curl --fail-with-body --silent --show-error -H "Authorization: Bearer $LICENSE_MASTER_API_TOKEN" "$LICENSE_MASTER_URL/release-channels?include_disabled=false")"
+          CHANNEL="$CHANNEL" CHANNELS="$channels" node -e 'const c=process.env.CHANNEL,j=JSON.parse(process.env.CHANNELS),ok=(j.channels||[]).some(x=>x.channel===c&&x.enabled===true);if(!ok)throw new Error("Base release channel is not configured or is disabled: "+c);'
+
+      - name: Publish Base artifact to GitHub Release
+        id: github-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ARTIFACT: ${{ steps.package.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="orbitfs-base-${VERSION}-${SOURCE_SHA:0:8}-run-${GITHUB_RUN_ID}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ARTIFACT" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$ARTIFACT" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_SHA" \
+              --title "OrbitFS Base ${VERSION}" \
+              --notes-file release-notes.md
+          fi
+          ASSET_URL="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq ".assets[] | select(.name==\"$ARTIFACT\") | .url" | head -n 1)"
+          test -n "$ASSET_URL" || { echo "::error::GitHub Base release asset REST URL was not returned."; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Create Base release in License Manager
+        id: master-release
+        env:
+          LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
+          LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ARTIFACT: ${{ steps.package.outputs.artifact }}
+          ARTIFACT_URL: ${{ steps.github-release.outputs.asset_url }}
+          ARTIFACT_TAG: ${{ steps.github-release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHECKSUM="$(sha256sum "$ARTIFACT" | awk '{print $1}')"
+          VERSION="$VERSION" CHANNEL="$CHANNEL" SOURCE_SHA="$SOURCE_SHA" CHECKSUM="$CHECKSUM" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_RUN_ID="$GITHUB_RUN_ID" ARTIFACT="$ARTIFACT" ARTIFACT_URL="$ARTIFACT_URL" ARTIFACT_TAG="$ARTIFACT_TAG" node - <<'NODE'
+          const fs=require('fs'),{gunzipSync}=require('node:zlib');
+          const pkg=JSON.parse(gunzipSync(fs.readFileSync(process.env.ARTIFACT)).toString('utf8'));
+          const manifest={
+            format:pkg.format,
+            schemaVersion:pkg.schemaVersion,
+            version:pkg.version,
+            sourceCommit:pkg.sourceCommit,
+            components:pkg.components,
+            componentVersions:pkg.componentVersions,
+            checkpointRequired:pkg.checkpointRequired,
+            minimumEngineDeployerProtocol:pkg.minimumEngineDeployerProtocol,
+            projectSettings:pkg.projectSettings,
+            fileCount:pkg.fileCount,
+            fileInventory:pkg.fileInventory,
+            databaseSchemaVersion:pkg.databaseSchemaVersion,
+            databaseSchemaPath:pkg.databaseSchemaPath,
+            databaseSchemaSha256:pkg.databaseSchemaSha256,
+            databaseMigrationCount:pkg.databaseMigrationCount,
+            databaseMigrationRoot:pkg.databaseMigrationRoot,
+            databaseMigrationRootSha256:pkg.databaseMigrationRootSha256,
+            databaseLatestMigration:pkg.databaseLatestMigration,
+            databaseMigrations:pkg.databaseMigrations,
+            databaseMigrationChain:pkg.databaseMigrationChain,
+            database:pkg.database,
+            databaseCompatibility:pkg.databaseCompatibility,
+            rollbackPolicy:pkg.rollbackPolicy,
+            releaseLifecycle:pkg.releaseLifecycle,
+            artifactTag:process.env.ARTIFACT_TAG
+          };
+          const request={
+            product:'orbitfs_base',
+            version:process.env.VERSION,
+            channel:process.env.CHANNEL,
+            release_type:'base',
+            source_repo:process.env.GITHUB_REPOSITORY,
+            source_ref:'base-release',
+            source_sha:process.env.SOURCE_SHA,
+            artifact_repo:process.env.GITHUB_REPOSITORY,
+            artifact_name:process.env.ARTIFACT,
+            artifact_run_id:Number(process.env.GITHUB_RUN_ID),
+            artifact_url:process.env.ARTIFACT_URL,
+            checksum:process.env.CHECKSUM,
+            notes:fs.readFileSync('release-notes.md','utf8'),
+            vercel_ready:true,
+            supabase_ready:true,
+            manifest
+          };
+          fs.writeFileSync('base-release-request.json',JSON.stringify(request));
+          NODE
+          response="$(curl --fail-with-body --silent --show-error -X POST "$LICENSE_MASTER_URL/releases" -H "Authorization: Bearer $LICENSE_MASTER_API_TOKEN" -H "Content-Type: application/json" --data-binary @base-release-request.json)"
+          release_id="$(jq -r '.release.id // .release_id // empty' <<<"$response")"
+          test -n "$release_id" || { echo "::error::License Manager did not return a Base release id."; exit 1; }
+          echo "id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "Base candidate created in License Manager: $release_id"
+
+      - name: Candidate handoff complete
+        run: echo "Base candidate is in License Manager. Technical validation runs next; approval/publication remain manual."
+
+  technical-validation:
+    name: License Manager technical validation
+    needs: candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate Base candidate
+        env:
+          LICENSE_MASTER_URL: ${{ needs.candidate.outputs.license_master_url }}
+          LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
+          RELEASE_ID: ${{ needs.candidate.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_ID"
+          response="$(curl --fail-with-body --silent --show-error -X POST "$LICENSE_MASTER_URL/releases/$RELEASE_ID/validate" -H "Authorization: Bearer $LICENSE_MASTER_API_TOKEN")"
+          status="$(jq -r '.validation.status // .release.manifest.validation.status // empty' <<<"$response")"
+          if [ "$status" != "passed" ]; then
+            echo "::error::License Manager Base validation failed."
+            jq -r '.validation.checks[]? | select(.ok==false) | "[" + (.key//"check") + "] " + (.message//"Validation failed")' <<<"$response" || true
+            jq -r '.release.manifest.validation.checks[]? | select(.ok==false) | "[" + (.key//"check") + "] " + (.message//"Validation failed")' <<<"$response" || true
+            exit 1
+          fi
+          echo "License Manager Base validation passed."
+
+      - name: Manual approval handoff
+        run: echo "Technical validation passed. Approve and publish this Base candidate manually in License Manager before deploying it to customers."
