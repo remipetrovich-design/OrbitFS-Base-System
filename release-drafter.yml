@@ -1,0 +1,16 @@
+name-template: 'OrbitFS Base Deployment v$RESOLVED_VERSION'
+tag-template: 'orbitfs-base-$RESOLVED_VERSION'
+change-template: '- $TITLE (#$NUMBER)'
+version-resolver:
+  major:
+    labels: ['major']
+  minor:
+    labels: ['minor']
+  patch:
+    labels: ['patch']
+  default: patch
+categories:
+  - title: 'Base changes'
+    labels: ['base','enhancement']
+  - title: 'Fixes'
+    labels: ['fix','bug']

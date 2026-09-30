@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 1,
+  "product": "orbitfs_base",
+  "deployment": "vercel",
+  "runtime": "sveltekit",
+  "sourceOfTruth": ".env.example",
+  "production": {
+    "panelUrl": "https://panel.incendiarynetworks.cc",
+    "licenseMasterUrl": "https://incendiarynetworks.cc/api/v1/license",
+    "licenseMasterApiBase": "/api/v1/license",
+    "storageBucket": "orbitfs-files"
+  },
+  "variables": [
+    {
+      "name": "SUPABASE_URL",
+      "required": true,
+      "secret": false,
+      "default": null,
+      "source": "deployment_context"
+    },
+    {
+      "name": "SUPABASE_PUBLISHABLE_KEY",
+      "required": true,
+      "secret": false,
+      "default": null,
+      "source": "deployment_context"
+    },
+    {
+      "name": "SUPABASE_SECRET_KEY",
+      "required": true,
+      "secret": true,
+      "default": null,
+      "source": "deployment_secret"
+    },
+    {
+      "name": "ORBITFS_DB_SECRET",
+      "required": true,
+      "secret": true,
+      "default": null,
+      "source": "deployment_secret"
+    },
+    {
+      "name": "ORBITFS_INSTALLATION_ID",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "installation_identity",
+      "notes": "Billing Store/deployer may provide the authoritative installation identity. Clear on full uninstall/reset."
+    },
+    {
+      "name": "ORBITFS_PANEL_URL",
+      "required": true,
+      "secret": false,
+      "default": "https://panel.incendiarynetworks.cc",
+      "source": "default"
+    },
+    {
+      "name": "ORBITFS_LICENSE_API_URL",
+      "required": true,
+      "secret": false,
+      "default": "https://incendiarynetworks.cc/api/v1/license",
+      "source": "default"
+    },
+    {
+      "name": "ORBITFS_APP_VERSION",
+      "required": true,
+      "secret": false,
+      "default": null,
+      "source": "release_version"
+    },
+    {
+      "name": "ORBITFS_BASE_RELEASE_ID",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "release_authority",
+      "notes": "License Manager release id for the exact Base deployment."
+    },
+    {
+      "name": "ORBITFS_BASE_SOURCE_COMMIT",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "release_authority",
+      "notes": "Exact source commit recorded by the approved Base release."
+    },
+    {
+      "name": "ORBITFS_BASE_RELEASE_SHA256",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "release_authority",
+      "notes": "SHA-256 of the approved Base artifact."
+    },
+    {
+      "name": "ORBITFS_ENGINE_HOST_URL",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "engine_provisioning"
+    },
+    {
+      "name": "ORBITFS_ENGINE_HOST_PREVIEW_URL",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "engine_provisioning"
+    },
+    {
+      "name": "ORBITFS_ENGINE_SECRET",
+      "required": false,
+      "secret": true,
+      "default": null,
+      "source": "shared_engine_secret",
+      "fallback": "ORBITFS_DB_SECRET"
+    },
+    {
+      "name": "ORBITFS_ENGINE_RELEASE_PROVIDER",
+      "required": false,
+      "secret": false,
+      "default": "https://incendiarynetworks.cc/api/v1/updater",
+      "source": "default"
+    },
+    {
+      "name": "ORBITFS_UPDATE_CHANNEL",
+      "required": false,
+      "secret": false,
+      "default": "stable",
+      "source": "default",
+      "notes": "Normal Engine/add-on update channel. Separate from ORBITFS_RELEASE_CHANNEL, which identifies Base release delivery."
+    },
+    {
+      "name": "ORBITFS_ENGINE_RELEASE_TIMEOUT_MS",
+      "required": false,
+      "secret": false,
+      "default": "30000",
+      "source": "default"
+    },
+    {
+      "name": "ORBITFS_VERCEL_TIMEOUT_MS",
+      "required": false,
+      "secret": false,
+      "default": "30000",
+      "source": "default"
+    },
+    {
+      "name": "ORBITFS_ENGINE_PROJECT_PREFIX",
+      "required": false,
+      "secret": false,
+      "default": "orbitfs-engine",
+      "source": "default"
+    },
+    {
+      "name": "ORBITFS_VERCEL_TOKEN",
+      "required": false,
+      "secret": true,
+      "default": null,
+      "source": "admin_connection"
+    },
+    {
+      "name": "ORBITFS_VERCEL_TEAM_ID",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "admin_connection"
+    },
+    {
+      "name": "ORBITFS_LICENSE_TIMEOUT_MS",
+      "required": false,
+      "secret": false,
+      "default": "8000",
+      "source": "default"
+    },
+    {
+      "name": "ORBITFS_SCHEMA_VERSION",
+      "required": false,
+      "secret": false,
+      "default": "1",
+      "source": "default"
+    },
+    {
+      "name": "ORBITFS_RELEASE_CHANNEL",
+      "required": false,
+      "secret": false,
+      "default": "stable",
+      "source": "default",
+      "notes": "Base release delivery channel (stable/beta/dev or another License Manager channel). Separate variable from ORBITFS_UPDATE_CHANNEL even when both use stable."
+    },
+    {
+      "name": "ORBITFS_PANEL_RELEASE_VERSION",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "release_version"
+    }
+  ],
+  "githubActions": {
+    "variables": {
+      "LICENSE_MASTER_URL": "https://incendiarynetworks.cc/api/v1"
+    },
+    "secrets": [
+      "LICENSE_MASTER_API_TOKEN"
+    ]
+  },
+  "forbiddenValues": [
+    "http://localhost",
+    "http://127.0.0.1",
+    "https://customlicensev1.vercel.app"
+  ],
+  "lifecycle": {
+    "protocolVersion": 2,
+    "endpoint": "/api/system/lifecycle",
+    "actions": [
+      "prepare",
+      "finalize"
+    ],
+    "modes": [
+      "undeploy",
+      "uninstall"
+    ],
+    "resetToStage1": {
+      "nextStage": 1,
+      "nextRequiredAction": "connect_supabase",
+      "clearSavedSupabaseConnection": true,
+      "clearEnvironment": [
+        "SUPABASE_URL",
+        "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_SECRET_KEY",
+        "ORBITFS_DB_SECRET",
+        "ORBITFS_INSTALLATION_ID",
+        "ORBITFS_ENGINE_HOST_URL",
+        "ORBITFS_ENGINE_HOST_PREVIEW_URL",
+        "ORBITFS_ENGINE_SECRET",
+        "ORBITFS_VERCEL_TOKEN",
+        "ORBITFS_VERCEL_TEAM_ID"
+      ]
+    },
+    "uninstall": {
+      "requiresLicenseManagerUnregister": true,
+      "finalizeConfirmationField": "authorityUnregistered",
+      "preserveCustomerDatabase": true
+    },
+    "undeploy": {
+      "requiresLicenseManagerUnregister": false,
+      "preserveCustomerDatabase": true
+    }
+  },
+  "updateModel": {
+    "protocolVersion": 1,
+    "systems": {
+      "baseDeployer": {
+        "owns": [
+          "initial_install",
+          "base_update"
+        ],
+        "projectIdentity": "orbitfs_settings:installation.route.projectId",
+        "createProjectOnInitialInstall": true,
+        "createProjectOnUpdate": false,
+        "updateMode": "redeploy_registered_project"
+      },
+      "normalUpdater": {
+        "owns": [
+          "engine",
+          "apex",
+          "mcp",
+          "studio"
+        ],
+        "channelVariable": "ORBITFS_UPDATE_CHANNEL",
+        "mayTargetBase": false,
+        "checkpointRequired": true
+      }
+    }
+  }
+}
