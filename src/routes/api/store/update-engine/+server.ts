@@ -84,7 +84,7 @@ export async function POST({request}:any){
 				supportedProtocol:ENGINE_DEPLOYER_PROTOCOL
 			});
 			if(plan.blocked) return fail(plan.reason||'Engine update is blocked by this installation.',409,'ENGINE_UPDATE_BLOCKED');
-			return json({ok:true,plan,release:{id:release.descriptor.releaseId,version:release.descriptor.version,channel:release.descriptor.channel,components:release.descriptor.components,checkpointRequired:release.descriptor.checkpointRequired,minimumEngineDeployerProtocol:release.descriptor.minimumEngineDeployerProtocol,executor:'base-inner-deployer'}});
+			return json({ok:true,plan,engineDeployerProtocol:ENGINE_DEPLOYER_PROTOCOL,release:{id:release.descriptor.releaseId,version:release.descriptor.version,channel:release.descriptor.channel,components:release.descriptor.components,checkpointRequired:release.descriptor.checkpointRequired,minimumEngineDeployerProtocol:release.descriptor.minimumEngineDeployerProtocol,executor:'base-inner-deployer'}});
 		}
 
 		if(mode==='rollback'){
@@ -135,6 +135,7 @@ export async function POST({request}:any){
 		return json({
 			ok:true,
 			waiting,
+			engineDeployerProtocol:ENGINE_DEPLOYER_PROTOCOL,
 			host:current,
 			updatePlan:(host as any)?.updatePlan||null,
 			databaseMigrations:Array.isArray((host as any)?.databaseMigrations)?(host as any).databaseMigrations:[]
