@@ -89,7 +89,7 @@
 		try{
 			for(let i=0;i<120;i+=1){
 				if(hostReady()||host?.state==='error'||!hostAdvancing())break;
-				await sleep(2500);
+				await sleep(60_000);
 				try{
 					const data=await api.post<HostResponse>('/engine-host/refresh');
 					host=data.host;
