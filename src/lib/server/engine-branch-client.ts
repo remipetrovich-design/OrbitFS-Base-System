@@ -65,7 +65,7 @@ export async function fetchAuthorizedEngineBranch(selection: { sourceCommit?: st
     throw fail('ENGINE_SOURCE_CHECKSUM_MISMATCH', 502);
   const descriptor: EngineReleaseDescriptor = {
     version: String(item.version), releaseId: String(item.id), channel: 'branch',
-    requiresPanelUpdate: false, sourceCommit: sha, sha256: expected, size: archive.length,
+    sourceCommit: sha, sha256: expected, size: archive.length,
     fileCount: Number(item.fileCount), downloadUrl: '', expiresIn: 0,
     projectSettings: { framework: 'sveltekit', buildCommand: 'npm run build', installCommand: 'npm ci' },
     components: ['mcp', 'apex', 'studio'], checkpointRequired: true,
