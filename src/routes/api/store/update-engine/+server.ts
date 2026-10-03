@@ -76,9 +76,6 @@ export async function POST({request}:any){
 
 		if(mode==='plan'){
 			const release=(await scopeEngineReleaseForInstalledLicenses(await fetchLatestEngineRelease({releaseId,channel:releaseChannel}),body.components)).release;
-			if(release.descriptor.requiresPanelUpdate&&String(env.ORBITFS_UPDATE_RELEASE_ID||'').trim()!==release.descriptor.releaseId){
-				return fail(`Update ${release.descriptor.version} also changes OrbitFS Base. Apply the Base portion of this exact Update release before planning the Engine portion.`,409,'ENGINE_UPDATE_PANEL_REQUIRED');
-			}
 			const installedBaseVersion=await resolveInstalledBaseVersion();
 			const plan=await buildEngineUpdatePlan({
 				descriptor:release.descriptor,
@@ -87,7 +84,7 @@ export async function POST({request}:any){
 				supportedProtocol:ENGINE_DEPLOYER_PROTOCOL
 			});
 			if(plan.blocked) return fail(plan.reason||'Engine update is blocked by this installation.',409,'ENGINE_UPDATE_BLOCKED');
-			return json({ok:true,plan,release:{id:release.descriptor.releaseId,version:release.descriptor.version,channel:release.descriptor.channel,components:release.descriptor.components,checkpointRequired:release.descriptor.checkpointRequired,minimumEngineDeployerProtocol:release.descriptor.minimumEngineDeployerProtocol,requiresPanelUpdate:release.descriptor.requiresPanelUpdate}});
+			return json({ok:true,plan,release:{id:release.descriptor.releaseId,version:release.descriptor.version,channel:release.descriptor.channel,components:release.descriptor.components,checkpointRequired:release.descriptor.checkpointRequired,minimumEngineDeployerProtocol:release.descriptor.minimumEngineDeployerProtocol,executor:'base-inner-deployer'}});
 		}
 
 		if(mode==='rollback'){
@@ -122,6 +119,7 @@ export async function POST({request}:any){
 			},{status:waiting?202:200});
 		}
 
+		// The normal updater never mutates Base files. It delegates Shared Engine/MCP/APEX/Studio execution to the Base-owned inner deployer.
 		const host=await provisionSharedEngineHost({
 			releaseId,
 			releaseSource:'published-update',
