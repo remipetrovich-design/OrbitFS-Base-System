@@ -20,7 +20,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Check active GitHub profile
+        id: profile
+        shell: bash
+        env:
+          EXPECTED_GITHUB_PROFILE: fallback
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error --retry 2 --retry-delay 2 https://dev.incendiarynetworks.cc/api/github-profile)"
+          active="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.profile||""))' "$response")"
+          echo "Active GitHub profile: $active"
+          echo "Expected for this repository: $EXPECTED_GITHUB_PROFILE"
+          if [ "$active" != "$EXPECTED_GITHUB_PROFILE" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Inactive GitHub profile. Remaining workflow steps are disabled."
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
       - name: Require explicit promotion confirmation
+        if: steps.profile.outputs.run == 'true'
         env:
           CONFIRMATION: ${{ inputs.confirmation }}
         shell: bash
@@ -29,6 +48,7 @@ jobs:
           test "$CONFIRMATION" = "PROMOTE"
 
       - name: Resolve latest main commit
+        if: steps.profile.outputs.run == 'true'
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,21 +61,25 @@ jobs:
           echo "Validating latest main: $sha"
 
       - name: Checkout latest main exactly
+        if: steps.profile.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.source.outputs.target_sha }}
           fetch-depth: 0
 
       - name: Use Node 24
+        if: steps.profile.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
 
       - name: Install locked dependencies
+        if: steps.profile.outputs.run == 'true'
         run: npm ci
 
       - name: Reject Base release history rewrites
+        if: steps.profile.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -71,12 +95,15 @@ jobs:
           fi
 
       - name: Typecheck
+        if: steps.profile.outputs.run == 'true'
         run: npm run check
 
       - name: Production build
+        if: steps.profile.outputs.run == 'true'
         run: npm run build
 
       - name: Verify Base release artifact can be generated
+        if: steps.profile.outputs.run == 'true'
         shell: bash
         env:
           TARGET_SHA: ${{ steps.source.outputs.target_sha }}
@@ -91,6 +118,7 @@ jobs:
           node -e "const fs=require('fs'),{gunzipSync}=require('zlib');const p=JSON.parse(gunzipSync(fs.readFileSync('/tmp/orbitfs-base-ci.json.gz'))),c=p.databaseMigrationChain;if(p.format!=='orbitfs-base-deployment-v2'||p.schemaVersion!==2||p.releaseChannel!=='stable'||!p.files?.length||p.databaseCompatibility?.mode!=='expand-contract'||p.databaseCompatibility?.migrationMode!=='forward-only'||p.databaseCompatibility?.automaticDestructiveMigrations!==false||p.rollbackPolicy?.databaseRollback!=='forward-only-no-down-migrations'||c?.format!=='orbitfs-base-migration-chain-v1'||c?.complete!==true||c?.baseline!==true||c?.migrationCount!==p.databaseMigrationCount||c?.rootMigration!==p.databaseMigrationRoot||c?.rootSha256!==p.databaseMigrationRootSha256||c?.latestMigration!==p.databaseLatestMigration||!Array.isArray(c?.migrations)||c.migrations.length!==p.databaseMigrationCount||p.database?.migrationChain?.rootMigration!==p.databaseMigrationRoot)process.exit(1)"
 
       - name: Verify public License Manager API contract
+        if: steps.profile.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -106,6 +134,7 @@ jobs:
           test "$updater_status" = "401"
 
       - name: Promote validated main to base-release
+        if: steps.profile.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_BRANCH: base-release
