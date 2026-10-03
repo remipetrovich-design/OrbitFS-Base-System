@@ -132,7 +132,13 @@ export async function POST({request}:any){
 		});
 		const current=await getSharedEngineHostState();
 		const waiting=['provisioning','deploying','deployed','linking'].includes(String(current.state||'')) || Boolean(current.pendingDeploymentId) || Boolean(current.pendingReleaseInventory?.length) || current.updaterConnected!==true;
-		return json({ok:true,waiting,host:current,updatePlan:(host as any)?.updatePlan||null},{status:waiting?202:200});
+		return json({
+			ok:true,
+			waiting,
+			host:current,
+			updatePlan:(host as any)?.updatePlan||null,
+			databaseMigrations:Array.isArray((host as any)?.databaseMigrations)?(host as any).databaseMigrations:[]
+		},{status:waiting?202:200});
 	}catch(error:any){
 		return fail(String(error?.message||'Store Engine update failed'),Number(error?.status||500),String(error?.code||'STORE_ENGINE_UPDATE_FAILED'));
 	}
