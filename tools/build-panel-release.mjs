@@ -238,6 +238,12 @@ for(const marker of [
 ]){
   if(!innerSource.includes(marker))throw new Error(`Inner Engine deployer is missing Supabase connection safeguard: ${marker}`);
 }
+const engineReleaseClientFile=files.find((file)=>file.file==='src/lib/server/engine-release-client.ts');
+const engineReleaseClientSource=engineReleaseClientFile?Buffer.from(engineReleaseClientFile.data,'base64').toString('utf8'):'';
+if(!engineReleaseClientSource.includes('ENGINE_RELEASE_SCOPE_INVALID'))throw new Error('Base updater boundary does not reject mixed Base + Engine Update payloads');
+const engineUpdaterRouteFile=files.find((file)=>file.file==='src/routes/api/store/update-engine/+server.ts');
+const engineUpdaterRouteSource=engineUpdaterRouteFile?Buffer.from(engineUpdaterRouteFile.data,'base64').toString('utf8'):'';
+if(!engineUpdaterRouteSource.includes("executor:'base-inner-deployer'"))throw new Error('Engine/add-on updater is not delegated to the Base-owned inner deployer');
 if (!files.some((file) => file.file.startsWith('src/'))) throw new Error('src files are required');
 
 for (const migration of databaseMigrations) {
@@ -293,6 +299,12 @@ const payload = {
 	releaseChannel,
 	components: ['base'],
 	componentVersions: { base: version },
+	runtimeOwnership: {
+		base: 'base-deployer-updater',
+		innerDeployer: 'base',
+		engineUpdaterExecutor: 'base-inner-deployer-v1',
+		excludedUpdateTargets: ['mcp','apex','studio']
+	},
 	checkpointRequired: false,
 	minimumEngineDeployerProtocol: 1,
 	releaseId: `base-${version}`,
