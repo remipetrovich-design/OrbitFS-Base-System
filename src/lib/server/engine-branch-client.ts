@@ -42,9 +42,9 @@ export async function fetchAuthorizedEngineBranch(selection: { sourceCommit?: st
   const sha = String(item.sourceCommit || '').trim().toLowerCase();
   const expected = String(item.checksum || '').trim().toLowerCase();
   if (!/^[a-f0-9]{40}$/.test(sha) || !/^[a-f0-9]{64}$/.test(expected) ||
-    String(item.sourceRepo) !== 'lucaskerim123/V1-vercel-engine' ||
+    String(item.sourceRepo) !== 'remipetrovich-design/OrbitFS_Engine' ||
     String(item.sourceRef) !== 'UPDATE_RELEASE' ||
-    String(item.id) !== 'github:lucaskerim123/V1-vercel-engine@' + sha)
+    String(item.id) !== 'github:remipetrovich-design/OrbitFS_Engine@' + sha)
     throw fail('ENGINE_SOURCE_DESCRIPTOR_INVALID', 502);
   if (requested && requested !== sha) throw fail('ENGINE_SOURCE_STALE', 409);
   url.searchParams.set('sha', sha);
