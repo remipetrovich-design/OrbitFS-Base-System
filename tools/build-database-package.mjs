@@ -9,6 +9,7 @@ const sourceCommit=arg('commit',process.env.GITHUB_SHA||'').trim().toLowerCase()
 const schemaVersionRaw=arg('schema-version',process.env.ORBITFS_SCHEMA_VERSION||'').trim();
 const output=resolve(ROOT,arg('output','database-package-base.json'));
 const snapshotPath=resolve(ROOT,arg('snapshot','supabase/customer-schema.sql'));
+const metadataPath=resolve(ROOT,arg('metadata','orbitfs-database-schema.json'));
 
 if(!/^[a-f0-9]{40}$/.test(sourceCommit))throw new Error('A full 40-character source commit is required');
 
@@ -38,6 +39,13 @@ const migrations=files.map((name)=>{
 });
 
 let snapshot=null;
+let componentBoundary=null;
+if(existsSync(metadataPath)&&statSync(metadataPath).isFile()){
+  const metadata=JSON.parse(readFileSync(metadataPath,'utf8'));
+  if(metadata?.componentBoundary?.format==='orbitfs-database-component-boundary-v1'){
+    componentBoundary=metadata.componentBoundary;
+  }
+}
 if(existsSync(snapshotPath)&&statSync(snapshotPath).isFile()){
   const bytes=readFileSync(snapshotPath);
   if(bytes.length){
@@ -54,7 +62,7 @@ if(existsSync(snapshotPath)&&statSync(snapshotPath).isFile()){
 
 const configuredSchemaVersion=Number(schemaVersionRaw);
 const databaseSchemaVersion=Number.isInteger(configuredSchemaVersion)&&configuredSchemaVersion>0
-  ? Math.max(configuredSchemaVersion,migrations.length)
+  ? configuredSchemaVersion
   : migrations.length;
 
 const payload={
@@ -69,7 +77,8 @@ const payload={
   minimumBaseVersion:null,
   migrationCount:migrations.length,
   migrations,
-  ...(snapshot?{snapshot}:{})
+  ...(snapshot?{snapshot}:{}),
+  ...(componentBoundary?{componentBoundary}:{})
 };
 
 writeFileSync(output,JSON.stringify(payload,null,2)+'\n');

@@ -3,6 +3,7 @@ import { requireUser } from '$lib/server/auth';
 import { assertPanelLicensed } from '$lib/server/license';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 import { writeAudit } from '$lib/server/audit';
+import { getSharedEngineHostState } from '$lib/server/engine-host-state';
 import {
   getWorkspace,
   isSystemAdmin,
@@ -52,6 +53,8 @@ export async function GET({ cookies, params }: any) {
       ? await workspaceMembers(state.workspace.id)
       : (await workspaceMembers(state.workspace.id)).filter((member: any) => member.user_id === state.user.id);
     const reason = reasonFor({ ...state, memberEnabled });
+    const engineHost=await getSharedEngineHostState().catch(()=>null);
+    const engineBase=String(engineHost?.hostUrl||'').replace(/\/$/,'');
 
     return json({
       workspace: {
@@ -74,8 +77,8 @@ export async function GET({ cookies, params }: any) {
       members,
       canManageWorkspace: state.canManageWorkspace,
       canManageMembers: state.canManageMembers,
-      engineHost: 'https://orbitfsengine.vercel.app',
-      resource: 'https://orbitfsengine.vercel.app/mcp'
+      engineHost: engineBase||null,
+      resource: engineBase?engineBase+'/mcp':null
     });
   } catch (error: any) {
     return json({ error: String(error?.message || 'Could not load MCP workspace access') }, { status: Number(error?.status || 500) });

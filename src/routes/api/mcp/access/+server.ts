@@ -3,6 +3,7 @@ import { requireUser } from '$lib/server/auth';
 import { assertPanelLicensed } from '$lib/server/license';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 import { isSystemAdmin, visibleWorkspaces } from '$lib/server/workspaces';
+import { getSharedEngineHostState } from '$lib/server/engine-host-state';
 
 export async function GET({ cookies }: any) {
   try {
@@ -16,6 +17,8 @@ export async function GET({ cookies }: any) {
     if (memberships.error) throw memberships.error;
     const memberMcp = new Map((memberships.data ?? []).map((row: any) => [String(row.workspace_id), row]));
     const admin = isSystemAdmin(user);
+    const engineHost=await getSharedEngineHostState().catch(()=>null);
+    const engineBase=String(engineHost?.hostUrl||'').replace(/\/$/,'');
 
     const access = workspaces.map((workspace: any) => {
       const active = workspace.status === 'active';
@@ -61,8 +64,8 @@ export async function GET({ cookies }: any) {
       workspaces: access,
       count: allowedWorkspaces.length,
       blockedCount: access.filter((workspace: any) => !workspace.mcpAllowed).length,
-      resource: 'https://orbitfsengine.vercel.app/mcp',
-      engineHost: 'https://orbitfsengine.vercel.app'
+      resource: engineBase?engineBase+'/mcp':null,
+      engineHost: engineBase||null
     });
   } catch (error: any) {
     return json({ error: String(error?.message || 'Could not resolve MCP access') }, { status: Number(error?.status || 500) });

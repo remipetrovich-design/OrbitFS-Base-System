@@ -33,6 +33,14 @@
       "source": "deployment_secret"
     },
     {
+      "name": "ORBITFS_SUPABASE_CONNECTION_ATTESTATION",
+      "required": false,
+      "secret": false,
+      "default": null,
+      "source": "deployment_context",
+      "notes": "Required for Billing Store deployments. Contains only project/key fingerprints and is verified by the Inner Engine deployer before Supabase access."
+    },
+    {
       "name": "ORBITFS_DB_SECRET",
       "required": true,
       "secret": true,
@@ -46,6 +54,14 @@
       "default": null,
       "source": "installation_identity",
       "notes": "Billing Store/deployer may provide the authoritative installation identity. Clear on full uninstall/reset."
+    },
+    {
+      "name": "ORBITFS_INSTALLATION_ROUTE",
+      "required": false,
+      "secret": false,
+      "default": "standard",
+      "source": "deployment_context",
+      "notes": "Billing Store deployments set billing_store so first-time setup cannot accidentally register as a standalone install."
     },
     {
       "name": "ORBITFS_PANEL_URL",
@@ -175,7 +191,7 @@
       "name": "ORBITFS_SCHEMA_VERSION",
       "required": false,
       "secret": false,
-      "default": "1",
+      "default": "2",
       "source": "default"
     },
     {
@@ -226,6 +242,7 @@
         "SUPABASE_URL",
         "SUPABASE_PUBLISHABLE_KEY",
         "SUPABASE_SECRET_KEY",
+        "ORBITFS_SUPABASE_CONNECTION_ATTESTATION",
         "ORBITFS_DB_SECRET",
         "ORBITFS_INSTALLATION_ID",
         "ORBITFS_ENGINE_HOST_URL",

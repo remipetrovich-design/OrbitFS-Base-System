@@ -24,6 +24,8 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci
+      - name: Version compatibility regression
+        run: npm run check:versions
       - name: Typecheck
         run: npm run check
       - name: Lint

@@ -7,8 +7,8 @@
 - User authentication, registration and permissions
 - Workspaces and workspace membership
 - Library, Knowledge and Profiles
-- Projects, OSS and CCS
-- Panel-side Studio data/UI
+- Core Library, Knowledge and Profiles state
+- Generic add-on installation/linkage state
 - Licensing and installation identity
 - Add-on install, attach, detach and entitlement state
 - The shared Supabase-backed file/library model
@@ -80,9 +80,13 @@ It also checks the `orbitfs-files` Supabase Storage bucket, Base System licence,
 
 ## Database source of truth
 
-Fresh Base installs use the ordered SQL chain in `supabase/migrations/`. The Dev Panel Base packaging worker deterministically composes that chain into `supabase/customer-schema.sql`, records its SHA-256, migration count and latest migration in the Base release manifest, and packages the snapshot with the Base artifact.
+Fresh Base installs use the ordered SQL chain in `supabase/migrations/` as immutable historical lineage. The snapshot builder composes that history and then applies a **fresh-install-only component boundary** so the final `supabase/customer-schema.sql` contains Base-owned schema only.
 
-`supabase/phase1.sql` remains a legacy helper only and must not be used as the fresh-install schema. Add schema changes as new timestamped migrations; run `npm run db:snapshot` locally when you want to inspect the composed customer schema.
+Historical migrations are never rewritten or deleted. Older migrations that once created MCP/Studio objects remain in lineage for compatibility, but the generated fresh-install snapshot removes Engine/add-on tables, views and routines before packaging. MCP, APEX and Studio database objects are supplied later by the central customer database package registry when those components are installed.
+
+The component boundary is recorded in Base database metadata and release manifests. It is not a forward migration and must never be used to remove add-on data from an existing customer database.
+
+`supabase/phase1.sql` remains a legacy helper only and must not be used as the fresh-install schema. Add Base-owned schema changes as new timestamped migrations; add Engine/add-on schema changes in `V1-vercel-engine`. Run `npm run db:snapshot` locally when you want to inspect the composed Base-only customer schema.
 
 ## Development
 
@@ -96,4 +100,3 @@ npm run build
 Automated Base deployers should read `deployment/base-environment.json` first and use it as the machine-readable environment contract. `.env.example` is the human-readable equivalent. The deployer must populate deployment-context values and secrets rather than searching the source tree for environment names.
 
 Production defaults are centralized on the License Master API `https://incendiarynetworks.cc/api` and the production Panel origin `https://panel.incendiarynetworks.cc`. Customer-specific Vercel deployments may override `ORBITFS_PANEL_URL` with their actual public HTTPS deployment URL; when it is omitted, Base can derive the public Vercel URL from Vercel's deployment environment.
-

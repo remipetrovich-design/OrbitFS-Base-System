@@ -34,6 +34,7 @@ const databaseLatestMigration = String(database.latestMigration || '').trim();
 const databaseMigrations = Array.isArray(database.migrations) ? database.migrations : [];
 const databaseMigrationRoot = String(database.migrationRoot || databaseMigrations[0]?.id || '').trim();
 const databaseMigrationRootSha256 = String(database.migrationRootSha256 || databaseMigrations[0]?.sha256 || '').trim().toLowerCase();
+const databaseComponentBoundary = database?.componentBoundary && typeof database.componentBoundary === 'object' ? database.componentBoundary : null;
 const databaseMigrationChain = database?.migrationChain && typeof database.migrationChain === 'object'
 	? database.migrationChain
 	: {
@@ -50,6 +51,7 @@ const databaseMigrationChain = database?.migrationChain && typeof database.migra
 	};
 
 if (!databaseSchemaVersion) throw new Error('Database schema version is required');
+if (!databaseComponentBoundary || databaseComponentBoundary.format !== 'orbitfs-database-component-boundary-v1' || databaseComponentBoundary.freshInstallOnly !== true || databaseComponentBoundary.owner !== 'base') throw new Error('Base database component boundary metadata is missing or invalid');
 if (databaseSchemaPath !== 'supabase/customer-schema.sql') throw new Error('Base database snapshot path must be supabase/customer-schema.sql');
 if (!/^[a-f0-9]{64}$/.test(databaseSchemaSha256)) throw new Error('Database schema SHA-256 is invalid');
 if (!Number.isInteger(databaseMigrationCount) || databaseMigrationCount < 1 || databaseMigrations.length !== databaseMigrationCount) throw new Error('Database migration metadata is incomplete');
@@ -191,6 +193,51 @@ if (!schemaFile || schemaFile.sha256 !== databaseSchemaSha256) throw new Error('
 if (!files.some((file) => file.file === 'package.json')) throw new Error('package.json is required');
 if (!files.some((file) => file.file === 'svelte.config.js')) throw new Error('svelte.config.js is required');
 if (!files.some((file) => file.file === 'tools/prepare-license-runtime.mjs')) throw new Error('tools/prepare-license-runtime.mjs is required');
+const requiredRuntimeFiles = [
+  'deployment/base-environment.json',
+  'src/lib/server/vercel-engine-provision.ts',
+  'src/lib/server/engine-host.ts',
+  'src/lib/server/engine-release-client.ts',
+  'src/lib/server/engine-update-planner.ts',
+  'src/lib/server/license.ts',
+  'src/lib/server/runtime-secrets.ts',
+  'src/routes/api/engine-host/+server.ts',
+  'src/routes/api/engine-host/[action]/+server.ts',
+  'src/routes/api/engine-host/launch/+server.ts',
+  'src/routes/api/engine-license/+server.ts',
+  'src/routes/api/license/activate/+server.ts',
+  'src/routes/api/license/status/+server.ts',
+  'src/hooks.server.ts',
+  'src/routes/setup/+page.svelte',
+  'src/routes/setup/owner/+page.svelte',
+  'src/routes/api/setup/[...rest]/+server.ts',
+  'src/routes/api/setup/status/+server.ts',
+  'src/routes/api/setup/owner/+server.ts',
+  'src/routes/api/store/update-engine/+server.ts'
+];
+for (const requiredFile of requiredRuntimeFiles) {
+  if (!files.some((file) => file.file === requiredFile)) throw new Error(`Required Base runtime/deployer file is missing: ${requiredFile}`);
+}
+const environmentFile=files.find((file)=>file.file==='deployment/base-environment.json');
+let environmentContract;
+try{environmentContract=JSON.parse(Buffer.from(environmentFile.data,'base64').toString('utf8'))}
+catch{throw new Error('Base environment deployment contract is invalid JSON')}
+const environmentNames=new Set((Array.isArray(environmentContract?.variables)?environmentContract.variables:[]).map((item)=>String(item?.name||'')));
+for(const requiredEnvironment of ['SUPABASE_URL','SUPABASE_PUBLISHABLE_KEY','SUPABASE_SECRET_KEY','ORBITFS_SUPABASE_CONNECTION_ATTESTATION','ORBITFS_DB_SECRET']){
+  if(!environmentNames.has(requiredEnvironment))throw new Error(`Base environment deployment contract is missing ${requiredEnvironment}`);
+}
+const innerFile=files.find((file)=>file.file==='src/lib/server/vercel-engine-provision.ts');
+const innerSource=innerFile?Buffer.from(innerFile.data,'base64').toString('utf8'):'';
+for(const marker of [
+  'ORBITFS_SUPABASE_CONNECTION_ATTESTATION',
+  'ENGINE_SUPABASE_PROJECT_MISMATCH',
+  'ENGINE_SUPABASE_PUBLISHABLE_KEY_MISMATCH',
+  'ENGINE_SUPABASE_SERVER_KEY_MISMATCH',
+  'ENGINE_DATABASE_PUBLISHABLE_KEY_REJECTED',
+  'ENGINE_DATABASE_SERVER_KEY_REJECTED'
+]){
+  if(!innerSource.includes(marker))throw new Error(`Inner Engine deployer is missing Supabase connection safeguard: ${marker}`);
+}
 if (!files.some((file) => file.file.startsWith('src/'))) throw new Error('src files are required');
 
 for (const migration of databaseMigrations) {
@@ -218,7 +265,8 @@ const databaseContract = {
 	migrationRootSha256: databaseMigrationRootSha256,
 	latestMigration: databaseLatestMigration,
 	migrations: databaseMigrations,
-	migrationChain: databaseMigrationChain
+	migrationChain: databaseMigrationChain,
+	componentBoundary: databaseComponentBoundary
 };
 const databaseCompatibility = {
 	mode: 'expand-contract',
@@ -262,6 +310,7 @@ const payload = {
 	databaseLatestMigration,
 	databaseMigrations,
 	databaseMigrationChain,
+	databaseComponentBoundary,
 	database: databaseContract,
 	databaseCompatibility,
 	rollbackPolicy,
@@ -278,6 +327,7 @@ const payload = {
 		databaseMigrationRootSha256,
 		databaseLatestMigration,
 		databaseMigrationChain,
+		databaseComponentBoundary,
 		databaseCompatibility,
 		rollbackPolicy,
 		releaseLifecycle

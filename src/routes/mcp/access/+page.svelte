@@ -56,7 +56,7 @@
 <div class="mx-auto max-w-7xl space-y-5 p-4 md:p-6">
 	<div class="flex flex-wrap items-start justify-between gap-3">
 		<div><p class="text-xs font-semibold uppercase tracking-[.2em] text-primary">MCP · Panel</p><h1 class="flex items-center gap-2 text-2xl font-semibold"><ShieldCheck class="size-6"/>Access & Workspaces</h1><p class="mt-1 max-w-3xl text-sm text-muted-foreground">One place to see exactly why a workspace is or is not available to MCP and ChatGPT. All required gates must pass.</p></div>
-		<div class="flex gap-2"><Button variant="outline" onclick={load} disabled={loading}><RefreshCw class="size-4"/>Refresh</Button><a href="https://orbitfsengine.vercel.app/engines/mcp" target="_blank" rel="noreferrer"><Button variant="outline">Engine Host <ExternalLink class="size-4"/></Button></a></div>
+		<div class="flex gap-2"><Button variant="outline" onclick={load} disabled={loading}><RefreshCw class="size-4"/>Refresh</Button><a href="/api/engine-host/launch?engine=mcp&path=%2Fengines%2Fmcp" target="_blank" rel="noreferrer"><Button variant="outline">Engine Host <ExternalLink class="size-4"/></Button></a></div>
 	</div>
 	{#if error}<div class="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</div>{/if}
 	{#if notice}<div class="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm">{notice}</div>{/if}

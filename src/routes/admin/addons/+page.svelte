@@ -9,7 +9,7 @@
 		installed:boolean; attached:boolean; recordAttached?:boolean;
 		licensed:boolean; licenseAllowed?:boolean; licenseReason?:string|null;
 		available:boolean; status:string; engineManageUrl?:string|null;
-		setupComplete?:boolean; needsSetup?:boolean; setupState?:string;
+		setupComplete?:boolean; needsSetup?:boolean; setupState?:string; installStatus?:string;
 	};
 	type Host = {
 		state:string; hostUrl:string|null; projectName:string|null; projectId:string|null;
@@ -49,11 +49,13 @@
 	const sleep=(ms:number)=>new Promise((resolve)=>setTimeout(resolve,ms));
 	const recordAttached=(a:Addon)=>a.recordAttached===true||a.attached===true;
 	const engineUrl=(a:Addon)=>a.engineManageUrl||(host?.hostUrl?`${host.hostUrl}/engines/${a.id}`:'');
+	const hasEngineComponent=()=>addons.some((addon)=>addon.installed||addon.installStatus==='installing');
 
 	function availability(a:Addon){
 		if(!a.available)return 'Unavailable';
 		if(a.licenseAllowed===false)return 'Not licensed';
 		if(recordAttached(a)&&a.licensed&&a.needsSetup)return 'Setup required';
+		if(a.installStatus==='installing')return 'Installing';
 		if(recordAttached(a)&&a.licensed)return 'Linked';
 		if(a.installed)return 'Installed';
 		return 'Available';
@@ -161,7 +163,11 @@
 		busy=`${id}:${action}`; error='';
 		try{
 			const endpoint=action==='install'?`/addons/${id}/install`:`/addons/${id}/${action==='link'?'attach':action==='unlink'?'detach':action}`;
-			await api.post(endpoint);
+			const data=await api.post<any>(endpoint);
+			if(action==='install'&&data?.host){
+				host=data.host;
+				if(data.waiting===true||hostAdvancing())void pollHost();
+			}
 			await load(false);
 			await addonsStore.load();
 		}catch(e){ error=message(e,`${action} failed`); }
@@ -248,7 +254,7 @@
 					</div>
 				{/if}
 				<div class="flex flex-wrap gap-2">
-					{#if host?.state==='not_deployed'}
+					{#if host?.state==='not_deployed'&&hasEngineComponent()}
 						{#if provisioningAvailable}
 							<Button onclick={()=>hostAct('provision')} disabled={busy!==''}><Server class="size-4"/>Deploy Engine</Button>
 						{:else if provisioningMissing.includes('Vercel connection')}
@@ -256,6 +262,8 @@
 						{:else}
 							<Button disabled><Server class="size-4"/>Engine prerequisites missing</Button>
 						{/if}
+					{:else if host?.state==='not_deployed'}
+						<p class="text-sm text-muted-foreground">Install a licensed add-on below. OrbitFS will deploy and link the Shared Engine automatically as part of that install.</p>
 					{/if}
 					{#if hostAdvancing()}<Button disabled><LoaderCircle class="size-4 animate-spin"/>Deploying &amp; linking</Button>{/if}
 					{#if host?.state==='error'&&provisioningAvailable}<Button onclick={()=>hostAct('provision',{releaseId:host?.releaseId||undefined,releaseChannel:host?.releaseChannel||undefined,forceRedeploy:true})} disabled={busy!==''}>Retry Engine</Button>{/if}
@@ -317,7 +325,7 @@
 							{:else if addon.licenseAllowed===false}
 								<Button disabled>Licence required</Button>
 							{:else}
-								{#if !addon.installed}<Button onclick={()=>addonAct(addon.id,'install')} disabled={busy!==''}>Install</Button>{/if}
+								{#if !addon.installed}<Button onclick={()=>addonAct(addon.id,'install')} disabled={busy!==''||addon.installStatus==='installing'}>{#if addon.installStatus==='installing'}<LoaderCircle class="size-4 animate-spin"/>Installing…{:else}Install{/if}</Button>{/if}
 								{#if addon.installed&&!recordAttached(addon)}<Button onclick={()=>addonAct(addon.id,'link')} disabled={busy!==''||!hostReady()}><PlugZap class="size-4"/>Link to Engine</Button>{/if}
 								{#if recordAttached(addon)&&addon.licensed&&engineUrl(addon)}<a href={engineUrl(addon)} target="_blank" rel="noreferrer" class="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"><ExternalLink class="size-4"/>Open in Engine</a>{/if}
 							{/if}

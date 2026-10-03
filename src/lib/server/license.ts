@@ -758,7 +758,7 @@ function cacheSummary(summary:PanelLicenseSummary){
   return summary;
 }
 
-export async function getPanelLicenseSummary(options:{refresh?:boolean}={}):Promise<PanelLicenseSummary>{
+export async function getPanelLicenseSummary(options:{refresh?:boolean;requireAuthority?:boolean}={}):Promise<PanelLicenseSummary>{
   if(!options.refresh&&summaryCache&&summaryCache.expires>Date.now())return summaryCache.value;
 
   let row:LicenseRow|null=null;
@@ -807,7 +807,7 @@ export async function getPanelLicenseSummary(options:{refresh?:boolean}={}):Prom
   const locallyExpired=Number.isFinite(expiresAt)&&Date.now()>=expiresAt;
   const denied=knownDenied(m);
   const ttlValid=ttlUntil!==null&&Date.now()<ttlUntil&&!locallyExpired&&current.status==='active'&&policy.lastAuthoritativeValid&&!denied;
-  let mustValidate=Boolean(options.refresh||pulseChanged||policy.pulseValidationRequired||policyBootstrapNeeded||locallyExpired||(!denied&&!ttlValid));
+  let mustValidate=Boolean(options.requireAuthority||options.refresh||pulseChanged||policy.pulseValidationRequired||policyBootstrapNeeded||locallyExpired||(!denied&&!ttlValid));
 
   if(mustValidate&&!options.refresh&&!locallyExpired&&policy.failedValidationCount>0){
     const retryMs=policy.pulsePollSeconds===null?0:policy.pulsePollSeconds*1000;
@@ -898,6 +898,12 @@ export async function getPanelLicenseSummary(options:{refresh?:boolean}={}):Prom
       Date.now()<graceUntil;
 
     const detail=describeFetchError(error),code=String(error?.code||'LICENSE_MASTER_UNAVAILABLE');
+    if(options.requireAuthority){
+      return makeSummary(failed,false,code,{
+        offlineGrace:false,
+        refreshError:code+': '+detail
+      });
+    }
     await acknowledgePulseDirectives(failed,i.id,pendingDirectives,'failed',code,mayGrace?'offline_grace':'unavailable',detail);
     return cacheSummary(makeSummary(failed,mayGrace,mayGrace?null:code,{
       offlineGrace:mayGrace,

@@ -1,18 +1,19 @@
 import { createHash } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { configuredPanelUrl, getSharedEngineHostState, saveSharedEngineHostState } from '$lib/server/engine-host-state';
-import { verifyEngineUpdaterRelease } from '$lib/server/engine-release-client';
+import { fetchLatestEngineRelease, verifyEngineUpdaterRelease } from '$lib/server/engine-release-client';
 import { fetchAuthorizedEngineBranch, verifyAuthorizedEngineBranch } from '$lib/server/engine-branch-client';
 import { getVercelCredentials } from '$lib/server/vercel-connection';
 import { buildEngineUpdatePlan } from '$lib/server/engine-update-planner';
 import { createUpdateCheckpoint, getActiveRelease, setEngineActiveRelease } from '$lib/server/update-checkpoints';
-import { recordLicenseManagerCheckIn } from '$lib/server/license';
+import { getLicenseProviderSettings, recordLicenseManagerCheckIn } from '$lib/server/license';
 import { getInstallationRoute } from '$lib/server/setup';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 import { engineDatabaseCredentials, engineSharedSecret } from '$lib/server/runtime-secrets';
 import { resolveInstalledBaseVersion } from '$lib/server/base-release-state';
 import { resolveUpdaterProviderBase } from '$lib/server/updater-connection';
-import { prepareInstalledEngineAddonLicenses } from '$lib/server/cloud-addons';
+import { assertAddonLicensed, CLOUD_ADDON_MANIFESTS, prepareInstalledEngineAddonLicenses } from '$lib/server/cloud-addons';
+import { fetchEngineDatabasePackageSet } from '$lib/server/database-package-registry';
 
 const API = 'https://api.vercel.com';
 export const ENGINE_DEPLOYER_PROTOCOL = 1;
@@ -50,6 +51,57 @@ export function scopeEngineReleaseForExecution(release:any,requested:unknown){
 	};
 }
 
+export async function scopeEngineReleaseForInstalledLicenses(release:any,requested:unknown){
+	const preparedAddons=await prepareInstalledEngineAddonLicenses();
+	const installedAuthorized=[...new Set(preparedAddons
+		.filter((addon)=>addon.status==='locked'&&addon.lockedToThisInstallation===true)
+		.map((addon)=>String(addon.id||'').trim().toLowerCase())
+		.filter((component)=>ENGINE_COMPONENT_IDS.includes(component as any)))];
+	const explicitRequested=Array.isArray(requested)
+		?[...new Set(requested.map((item:any)=>String(item||'').trim().toLowerCase()).filter(Boolean))]
+		:[];
+	const unsupported=explicitRequested.filter((component)=>!ENGINE_COMPONENT_IDS.includes(component as any));
+	if(unsupported.length)throw fail('Unsupported Engine update component(s): '+unsupported.join(', '),400,'ENGINE_UPDATE_COMPONENT_INVALID');
+
+	// A newly requested component may be provisioned before its local installed
+	// flag is set, but only after License Manager has already locked that exact
+	// component to this installation. This breaks the old installed->deploy loop
+	// without trusting the client request as authorization.
+	const requestedAuthorized:string[]=[];
+	for(const component of explicitRequested){
+		if(installedAuthorized.includes(component)){
+			requestedAuthorized.push(component);
+			continue;
+		}
+		const manifest=CLOUD_ADDON_MANIFESTS[component];
+		const licenseComponent=String(manifest?.licenseComponent||'').trim();
+		if(!licenseComponent)throw fail('Unknown Engine component authorization mapping: '+component,400,'ENGINE_COMPONENT_AUTHORIZATION_INVALID');
+		try{
+			await assertAddonLicensed(licenseComponent,false);
+			requestedAuthorized.push(component);
+		}catch(error:any){
+			throw fail(
+				'This installation is not licensed and locked for Engine component(s): '+component,
+				Number(error?.status||403),
+				'ENGINE_COMPONENT_NOT_AUTHORIZED'
+			);
+		}
+	}
+
+	const targetComponents=[...new Set([
+		...installedAuthorized,
+		...(explicitRequested.length?requestedAuthorized:[])
+	])];
+	if(!targetComponents.length){
+		throw fail('Activate an entitled Engine add-on before deploying the Shared Engine Host.',409,'ENGINE_COMPONENT_REQUIRED');
+	}
+	return {
+		release:scopeEngineReleaseForExecution(release,targetComponents),
+		preparedAddons,
+		authorizedComponents:targetComponents
+	};
+}
+
 // The inner deployer is independent from website Update release publication.
 // Custom License Manager authenticates the installation and retrieves the pinned branch.
 export async function fetchEngineBootstrapRelease(_channel?: string | null) {
@@ -59,10 +111,6 @@ export async function fetchEngineBootstrapRelease(_channel?: string | null) {
 export function assertInitialEngineRelease(release: any) {
   const components=[...new Set((release?.descriptor?.components||[]).map((item:any)=>String(item).toLowerCase()).filter((item:string)=>ENGINE_COMPONENT_IDS.includes(item as any)))];
   if(!components.length) throw fail('Initial Engine install requires at least one authorized Engine component.',409,'ENGINE_BOOTSTRAP_BASELINE_INCOMPLETE');
-  const database=release?.package?.database;
-  if(database?.format!=='orbitfs-db-migrations-v1' || database?.mode!=='shared-panel' || database?.provider!=='supabase' || !Number.isInteger(database.migrationCount) || database.migrationCount<1 || !Array.isArray(database.migrations) || database.migrations.length!==database.migrationCount) {
-    throw fail('Approved initial Engine Update must include its complete, verified database migration manifest.',409,'ENGINE_BOOTSTRAP_DATABASE_MANIFEST_MISSING');
-  }
 }
 
 function fail(message: string, status = 500, code = 'ENGINE_HOST_PROVISION_FAILED') {
@@ -194,11 +242,160 @@ export async function deleteRegisteredSharedEngineProject(expectedProjectId: str
 }
 
 type PreparedDatabaseCredential={
-	mode:'server-secret'|'legacy-service-key-fallback';
+	mode:'server-secret';
 	dbSecret:string;
 	serviceKey:string;
 	derived:boolean;
 };
+
+type EngineDatabaseRuntimeAccessContract={
+	version:1;
+	schema:'public';
+	publicReadTables:string[];
+	runtimeSecretHeader:'x-orbitfs-secret';
+	runtimeSecretRoles:string[];
+	runtimeSecretTablePrefixes:string[];
+	runtimeSecretExcludedTables:string[];
+	runtimeSecretPreflightTables:string[];
+	runtimeSecretRepairRpc:'orbitfs_repair_runtime_access';
+	runtimeSecretProbeTable:'orbitfs_runtime_secret_probe';
+};
+
+type SupabaseConnectionAttestation={
+	version:1;
+	projectRef:string;
+	publishableKeySha256:string;
+	publishableKeyFormat:string;
+	serverKeySha256:string;
+	serverKeyFormat:string;
+};
+
+function supabaseApiKeyFormat(value:string){
+	if(value.startsWith('sb_publishable_'))return 'publishable';
+	if(value.startsWith('sb_secret_'))return 'secret';
+	if(value.startsWith('eyJ')&&value.split('.').length===3)return 'legacy-jwt';
+	return 'unknown';
+}
+function supabaseApiKeyFingerprint(value:string){return createHash('sha256').update(value).digest('hex')}
+function supabaseProjectRefFromUrl(value:string){
+	try{
+		const host=new URL(value).hostname.toLowerCase();
+		const suffix='.supabase.co';
+		if(!host.endsWith(suffix))return '';
+		return host.slice(0,-suffix.length);
+	}catch{return ''}
+}
+function supabaseConnectionAttestation(){
+	const encoded=String(env.ORBITFS_SUPABASE_CONNECTION_ATTESTATION||'').trim();
+	const billingManaged=String(env.ORBITFS_INSTALLATION_ROUTE||'').trim().toLowerCase()==='billing_store';
+	if(!encoded){
+		if(billingManaged)throw fail('Billing-managed Base deployment is missing its validated Supabase connection attestation.',409,'ENGINE_SUPABASE_ATTESTATION_MISSING');
+		return null;
+	}
+	let source:any;
+	try{source=JSON.parse(encoded)}catch{throw fail('Supabase connection attestation is not valid JSON.',409,'ENGINE_SUPABASE_ATTESTATION_INVALID')}
+	const attestation:SupabaseConnectionAttestation={
+		version:Number(source?.version) as 1,
+		projectRef:String(source?.projectRef||'').trim(),
+		publishableKeySha256:String(source?.publishableKeySha256||'').trim().toLowerCase(),
+		publishableKeyFormat:String(source?.publishableKeyFormat||'').trim(),
+		serverKeySha256:String(source?.serverKeySha256||'').trim().toLowerCase(),
+		serverKeyFormat:String(source?.serverKeyFormat||'').trim()
+	};
+	if(attestation.version!==1||!/^[a-z0-9]{20}$/.test(attestation.projectRef)||!/^[a-f0-9]{64}$/.test(attestation.publishableKeySha256)||!/^[a-f0-9]{64}$/.test(attestation.serverKeySha256)){
+		throw fail('Supabase connection attestation is malformed.',409,'ENGINE_SUPABASE_ATTESTATION_INVALID');
+	}
+	const supabaseUrl=String(env.SUPABASE_URL||'').trim();
+	const publishable=String(env.SUPABASE_PUBLISHABLE_KEY||'').trim();
+	const server=String(env.SUPABASE_SECRET_KEY||'').trim();
+	const urlRef=supabaseProjectRefFromUrl(supabaseUrl);
+	if(urlRef!==attestation.projectRef){
+		throw fail('Base Supabase URL does not match the Billing-selected Supabase project.',409,'ENGINE_SUPABASE_PROJECT_MISMATCH');
+	}
+	if(!publishable||supabaseApiKeyFingerprint(publishable)!==attestation.publishableKeySha256||supabaseApiKeyFormat(publishable)!==attestation.publishableKeyFormat){
+		throw fail('Base Supabase publishable key does not match the credential validated by Billing.',409,'ENGINE_SUPABASE_PUBLISHABLE_KEY_MISMATCH');
+	}
+	if(!server||supabaseApiKeyFingerprint(server)!==attestation.serverKeySha256||supabaseApiKeyFormat(server)!==attestation.serverKeyFormat){
+		throw fail('Base Supabase server key does not match the credential validated by Billing.',409,'ENGINE_SUPABASE_SERVER_KEY_MISMATCH');
+	}
+	return attestation;
+}
+function supabaseApiKeyHeaders(value:string){
+	const headers:Record<string,string>={apikey:value,accept:'application/json','user-agent':'OrbitFS-Base-Deployer/1.0'};
+	if(value.startsWith('eyJ')&&value.split('.').length===3)headers.authorization=`Bearer ${value}`;
+	return headers;
+}
+async function assertSupabaseApiKeyAccepted(kind:'publishable'|'server',value:string){
+	if(!value||supabaseApiKeyFormat(value)==='unknown'){
+		throw fail(`Configured Supabase ${kind} API key has an unsupported format.`,409,kind==='publishable'?'ENGINE_DATABASE_PUBLISHABLE_KEY_INVALID':'ENGINE_DATABASE_SERVER_KEY_INVALID');
+	}
+	const supabaseUrl=String(env.SUPABASE_URL||'').trim().replace(/\/+$/,'');
+	if(!supabaseUrl)throw fail('SUPABASE_URL is required before Supabase key validation.',409,'ENGINE_HOST_ENV_REQUIRED');
+	let response:Response;
+	try{
+		response=await fetch(new URL('/auth/v1/settings',supabaseUrl),{
+			headers:supabaseApiKeyHeaders(value),
+			cache:'no-store',
+			signal:AbortSignal.timeout(10_000)
+		});
+	}catch(error:any){
+		throw fail(`Could not reach Supabase while validating the ${kind} API key: ${String(error?.message||error)}`,503,'ENGINE_DATABASE_KEY_PROBE_FAILED');
+	}
+	if(response.ok)return;
+	const detail=(await response.text().catch(()=>'')).slice(0,500);
+	if(response.status===401||response.status===403){
+		throw fail(`Supabase rejected the configured ${kind} API key for the selected project.${detail?` ${detail}`:''}`,503,kind==='publishable'?'ENGINE_DATABASE_PUBLISHABLE_KEY_REJECTED':'ENGINE_DATABASE_SERVER_KEY_REJECTED');
+	}
+	throw fail(`Supabase ${kind} API-key validation returned HTTP ${response.status}.${detail?` ${detail}`:''}`,503,'ENGINE_DATABASE_KEY_PROBE_FAILED');
+}
+
+function runtimeAccessList(value:unknown,label:string,kind:'table'|'prefix'='table'){
+	const values=Array.isArray(value)?[...new Set(value.map((item)=>String(item||'').trim()).filter(Boolean))]:[];
+	const pattern=kind==='prefix'?/^[a-z_][a-z0-9_]*$/:/^[a-z_][a-z0-9_]*$/;
+	if(!values.length||values.length>64||values.some((item)=>!pattern.test(item))){
+		throw fail(`License Manager provided an invalid Engine database ${label} contract.`,502,'ENGINE_DATABASE_RUNTIME_ACCESS_CONTRACT_INVALID');
+	}
+	return values;
+}
+
+function engineDatabaseRuntimeAccessContract():EngineDatabaseRuntimeAccessContract{
+	const encoded=String(env.ORBITFS_DATABASE_RUNTIME_ACCESS_CONTRACT||'').trim();
+	if(!encoded)throw fail('License Manager runtime database access contract is missing from this Base deployment.',409,'ENGINE_DATABASE_RUNTIME_ACCESS_CONTRACT_MISSING');
+	let source:any;
+	try{source=JSON.parse(encoded);}catch{throw fail('License Manager runtime database access contract is not valid JSON.',502,'ENGINE_DATABASE_RUNTIME_ACCESS_CONTRACT_INVALID');}
+	if(!source||typeof source!=='object'||Array.isArray(source)||Number(source.version)!==1||String(source.schema||'')!=='public'){
+		throw fail('License Manager runtime database access contract is invalid.',502,'ENGINE_DATABASE_RUNTIME_ACCESS_CONTRACT_INVALID');
+	}
+	const publicReadTables=runtimeAccessList(source.publicReadTables,'public-read tables');
+	const runtimeSecretRoles=runtimeAccessList(source.runtimeSecretRoles,'runtime roles');
+	const runtimeSecretTablePrefixes=runtimeAccessList(source.runtimeSecretTablePrefixes,'table prefixes','prefix');
+	const runtimeSecretExcludedTables=runtimeAccessList(source.runtimeSecretExcludedTables,'excluded tables');
+	const runtimeSecretPreflightTables=runtimeAccessList(source.runtimeSecretPreflightTables,'preflight tables');
+	const runtimeSecretHeader=String(source.runtimeSecretHeader||'');
+	const runtimeSecretRepairRpc=String(source.runtimeSecretRepairRpc||'');
+	const runtimeSecretProbeTable=String(source.runtimeSecretProbeTable||'').trim();
+	if(runtimeSecretHeader!=='x-orbitfs-secret'||runtimeSecretRepairRpc!=='orbitfs_repair_runtime_access'||runtimeSecretProbeTable!=='orbitfs_runtime_secret_probe'||!['anon','authenticated'].every((role)=>runtimeSecretRoles.includes(role))){
+		throw fail('License Manager runtime database access contract is unsupported by this Base deployer.',409,'ENGINE_DATABASE_RUNTIME_ACCESS_CONTRACT_UNSUPPORTED');
+	}
+	if(runtimeSecretPreflightTables.some((table)=>runtimeSecretExcludedTables.includes(table)||!runtimeSecretTablePrefixes.some((prefix)=>table.startsWith(prefix)))){
+		throw fail('License Manager runtime database preflight tables are outside the authorized runtime table set.',502,'ENGINE_DATABASE_RUNTIME_ACCESS_CONTRACT_INVALID');
+	}
+	if(!runtimeSecretExcludedTables.includes(runtimeSecretProbeTable)||!runtimeSecretTablePrefixes.some((prefix)=>runtimeSecretProbeTable.startsWith(prefix))){
+		throw fail('License Manager runtime database probe table must be inside the runtime namespace and excluded from generic DML repair.',502,'ENGINE_DATABASE_RUNTIME_ACCESS_CONTRACT_INVALID');
+	}
+	return {
+		version:1,
+		schema:'public',
+		publicReadTables,
+		runtimeSecretHeader:'x-orbitfs-secret',
+		runtimeSecretRoles,
+		runtimeSecretTablePrefixes,
+		runtimeSecretExcludedTables,
+		runtimeSecretPreflightTables,
+		runtimeSecretRepairRpc:'orbitfs_repair_runtime_access',
+		runtimeSecretProbeTable:'orbitfs_runtime_secret_probe'
+	};
+}
 
 function missingDatabaseRuntimeRpc(error:any){
 	const code=String(error?.code||'').toUpperCase();
@@ -207,36 +404,58 @@ function missingDatabaseRuntimeRpc(error:any){
 }
 
 async function prepareEngineDatabaseCredential():Promise<PreparedDatabaseCredential>{
+	supabaseConnectionAttestation();
 	const database=engineDatabaseCredentials();
 	if(database.mode==='missing'||!database.dbSecret){
 		throw fail('No database runtime credential is available for the Shared Engine Host.',409,'ENGINE_HOST_DATABASE_CREDENTIAL_REQUIRED');
 	}
-	if(database.serviceKey){
-		const digest=createHash('sha256').update(database.dbSecret).digest('hex');
-		const synced=await getSupabaseAdmin().rpc('orbitfs_set_runtime_secret',{p_secret_sha256:digest,p_previous_grace_seconds:3600});
-		if(!synced.error){
-			return {mode:'server-secret',dbSecret:database.dbSecret,serviceKey:database.serviceKey,derived:database.derived};
-		}
+	if(!database.serviceKey){
+		throw fail('The Base deployment is missing its Supabase server repair credential. Reconfigure the customer deployment before provisioning the Shared Engine Host.',409,'ENGINE_DATABASE_REPAIR_CREDENTIAL_REQUIRED');
+	}
+	await assertSupabaseApiKeyAccepted('server',database.serviceKey);
+	const digest=createHash('sha256').update(database.dbSecret).digest('hex');
+	const synced=await getSupabaseAdmin().rpc('orbitfs_set_runtime_secret',{p_secret_sha256:digest,p_previous_grace_seconds:3600});
+	if(synced.error){
 		if(missingDatabaseRuntimeRpc(synced.error)){
-			if(database.derived){
-				return {mode:'legacy-service-key-fallback',dbSecret:'',serviceKey:database.serviceKey,derived:true};
-			}
-			return {mode:'server-secret',dbSecret:database.dbSecret,serviceKey:database.serviceKey,derived:false};
+			throw fail('The customer database is missing the current OrbitFS runtime-secret migration contract. Apply the current Base database migrations before provisioning the Shared Engine Host.',409,'ENGINE_DATABASE_RUNTIME_SECRET_CONTRACT_OUTDATED');
 		}
 		throw fail(`Could not synchronize the restricted Engine database credential: ${String(synced.error.message||synced.error)}`,503,'ENGINE_DATABASE_SECRET_SYNC_FAILED');
 	}
-	return {mode:'server-secret',dbSecret:database.dbSecret,serviceKey:'',derived:database.derived};
+	return {mode:'server-secret',dbSecret:database.dbSecret,serviceKey:database.serviceKey,derived:database.derived};
 }
 
-async function requiredEngineEnvironment(input:{version:string;releaseId:string;channel:string;projectName:string;baseVersion:string|null;installationId:string},database:PreparedDatabaseCredential) {
+async function repairEngineDatabaseRuntimeAccess(database:PreparedDatabaseCredential,contract:EngineDatabaseRuntimeAccessContract){
+	if(!database.serviceKey)throw fail('The Base deployment cannot repair Engine database access without its server repair credential.',409,'ENGINE_DATABASE_REPAIR_CREDENTIAL_REQUIRED');
+	const repaired=await getSupabaseAdmin().rpc(contract.runtimeSecretRepairRpc,{
+		p_table_prefixes:contract.runtimeSecretTablePrefixes,
+		p_excluded_tables:contract.runtimeSecretExcludedTables,
+		p_public_read_tables:contract.publicReadTables
+	});
+	if(repaired.error){
+		const code=String(repaired.error.code||'').toUpperCase();
+		const message=String(repaired.error.message||repaired.error);
+		if(['PGRST202','42883'].includes(code)||message.toLowerCase().includes(contract.runtimeSecretRepairRpc)){
+			throw fail('The customer database is missing the current OrbitFS runtime-access repair migration. Apply the current Base database migrations before provisioning the Shared Engine Host.',409,'ENGINE_DATABASE_RUNTIME_ACCESS_REPAIR_UNAVAILABLE');
+		}
+		throw fail(`Could not repair Shared Engine database runtime access: ${message}`,503,'ENGINE_DATABASE_RUNTIME_ACCESS_REPAIR_FAILED');
+	}
+	if(repaired.data&&typeof repaired.data==='object'&&(repaired.data as any).ok===false){
+		throw fail('The customer database rejected the OrbitFS runtime-access repair.',503,'ENGINE_DATABASE_RUNTIME_ACCESS_REPAIR_FAILED');
+	}
+}
+
+async function requiredEngineEnvironment(input:{version:string;releaseId:string;channel:string;projectName:string;baseVersion:string|null;installationId:string},database:PreparedDatabaseCredential,contract:EngineDatabaseRuntimeAccessContract) {
+	const licenseProvider=await getLicenseProviderSettings();
 	const values:Record<string,string> = {
 		SUPABASE_URL: String(env.SUPABASE_URL || '').trim(),
 		SUPABASE_PUBLISHABLE_KEY: String(env.SUPABASE_PUBLISHABLE_KEY || '').trim(),
+		ORBITFS_DB_SECRET:database.dbSecret,
+		ORBITFS_DATABASE_RUNTIME_ACCESS_CONTRACT:JSON.stringify(contract),
 		ORBITFS_ENGINE_SECRET: engineSharedSecret(),
 		ORBITFS_INSTALLATION_ID: String(input.installationId || '').trim(),
 		ORBITFS_PANEL_URL: configuredPanelUrl(),
 		ORBITFS_ENGINE_HOST_URL: `https://${input.projectName}.vercel.app`,
-		ORBITFS_LICENSE_API_URL: String(env.ORBITFS_LICENSE_API_URL || '').trim(),
+		ORBITFS_LICENSE_API_URL: String(licenseProvider.providerBase || '').trim(),
 		ORBITFS_ENGINE_RELEASE_PROVIDER: await resolveUpdaterProviderBase(),
 		ORBITFS_APP_VERSION: String(input.version || '').trim(),
 		ORBITFS_BASE_VERSION: String(input.baseVersion || (process.env.VERCEL_GIT_COMMIT_SHA ? `development-${process.env.VERCEL_GIT_COMMIT_SHA.slice(0,12)}` : 'development')).trim(),
@@ -244,64 +463,80 @@ async function requiredEngineEnvironment(input:{version:string;releaseId:string;
 		ORBITFS_RELEASE_CHANNEL: String(input.channel || 'stable').trim().toLowerCase(),
 		ORBITFS_UPDATE_CHANNEL: String(input.channel || 'stable').trim().toLowerCase()
 	};
-	if(database.mode==='server-secret') values.ORBITFS_DB_SECRET=database.dbSecret;
-	else if(database.mode==='legacy-service-key-fallback'&&database.serviceKey) values.SUPABASE_SECRET_KEY=database.serviceKey;
-	else throw fail('No database runtime credential is available for the Shared Engine Host.',409,'ENGINE_HOST_DATABASE_CREDENTIAL_REQUIRED');
 	for (const [key, value] of Object.entries(values)) {
 		if (!value) throw fail(`${key} is required before the Shared Engine Host can be provisioned.`, 409, 'ENGINE_HOST_ENV_REQUIRED');
 	}
 	return Object.entries(values).map(([key, value]) => ({ key, value, type: 'encrypted', target: ['production'] }));
 }
 
-
-async function assertEngineDatabaseAccess(database:PreparedDatabaseCredential) {
-	const probes=[
-		{table:'orbitfs_addons',label:'add-on catalog'},
-		{table:'orbitfs_users',label:'user registry'},
-		{table:'orbitfs_workspaces',label:'workspace registry'}
-	];
-	if(database.mode==='legacy-service-key-fallback'){
-		const db=getSupabaseAdmin();
-		for(const probe of probes){
-			const result=await db.from(probe.table).select('id').limit(1);
-			if(result.error) throw fail(`Shared Engine database preflight failed for the ${probe.label}: ${result.error.message}`,503,'ENGINE_DATABASE_PREFLIGHT_FAILED');
-		}
-		return;
-	}
-	if(database.mode!=='server-secret') throw fail('No database runtime credential is available for the Shared Engine Host.',409,'ENGINE_HOST_DATABASE_CREDENTIAL_REQUIRED');
-	const supabaseUrl=String(env.SUPABASE_URL||'').trim().replace(/\/+$/,'');
+function engineRuntimeRequestHeaders(database:PreparedDatabaseCredential,contract:EngineDatabaseRuntimeAccessContract){
 	const publishableKey=String(env.SUPABASE_PUBLISHABLE_KEY||'').trim();
-	const headers:Record<string,string>={
-		apikey:publishableKey,
-		'x-orbitfs-secret':database.dbSecret,
-		accept:'application/json'
-	};
-	// Supabase publishable keys are API keys, not JWTs. Sending
-	// sb_publishable_* as a Bearer token can be rejected with HTTP 401.
-	// Legacy anon JWT keys still require the Authorization header.
-	if(/^eyJ[A-Za-z0-9_-]*\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$/.test(publishableKey)){
-		headers.authorization=`Bearer ${publishableKey}`;
+	if(!publishableKey||!['publishable','legacy-jwt'].includes(supabaseApiKeyFormat(publishableKey))){
+		throw fail('SUPABASE_PUBLISHABLE_KEY is not a recognized Supabase publishable/anon key.',409,'ENGINE_DATABASE_PUBLISHABLE_KEY_INVALID');
 	}
-	for(const probe of probes){
-		const url=new URL(`/rest/v1/${probe.table}`,supabaseUrl);
+	return {
+		...supabaseApiKeyHeaders(publishableKey),
+		[contract.runtimeSecretHeader]:database.dbSecret
+	};
+}
+
+function engineDatabaseResponseFailure(response:Response,body:any,subject:string){
+	const detail=body&&typeof body==='object'?String(body.message||body.error_description||body.error||'').trim():'';
+	const code=body&&typeof body==='object'?String(body.code||'').trim().toUpperCase():'';
+	const normalized=`${code} ${detail}`.toLowerCase();
+	if(code==='42501'||normalized.includes('permission denied')){
+		return fail(`Shared Engine database runtime access is not installed correctly for ${subject}.${detail?` ${detail}`:''}`,503,'ENGINE_DATABASE_RUNTIME_ACCESS_DENIED');
+	}
+	if(response.status===401){
+		return fail(`Supabase rejected the configured publishable key while checking ${subject}.${detail?` ${detail}`:''}`,503,'ENGINE_DATABASE_PUBLISHABLE_KEY_REJECTED');
+	}
+	return fail(`Shared Engine database preflight failed for ${subject} with Supabase ${response.status}.${detail?` ${detail}`:''}`,503,'ENGINE_DATABASE_PREFLIGHT_FAILED');
+}
+
+async function assertEngineDatabaseAccess(database:PreparedDatabaseCredential,contract:EngineDatabaseRuntimeAccessContract) {
+	supabaseConnectionAttestation();
+	const supabaseUrl=String(env.SUPABASE_URL||'').trim().replace(/\/+$/,'');
+	if(!supabaseUrl)throw fail('SUPABASE_URL is required before Shared Engine database preflight.',409,'ENGINE_HOST_ENV_REQUIRED');
+	const publishableKey=String(env.SUPABASE_PUBLISHABLE_KEY||'').trim();
+	await assertSupabaseApiKeyAccepted('publishable',publishableKey);
+	const headers=engineRuntimeRequestHeaders(database,contract);
+
+	let probeResponse:Response;
+	const probeUrl=new URL(`/rest/v1/${encodeURIComponent(contract.runtimeSecretProbeTable)}`,supabaseUrl);
+	probeUrl.searchParams.set('select','probe_key,contract_version');
+	probeUrl.searchParams.set('probe_key','eq.runtime');
+	probeUrl.searchParams.set('limit','1');
+	try{
+		probeResponse=await fetch(probeUrl,{
+			headers,
+			cache:'no-store',
+			signal:AbortSignal.timeout(10_000)
+		});
+	}catch(error:any){
+		throw fail(`Shared Engine runtime-secret preflight could not reach Supabase: ${String(error?.message||error)}`,503,'ENGINE_DATABASE_PREFLIGHT_FAILED');
+	}
+	const probeBody:any=await probeResponse.json().catch(()=>null);
+	if(!probeResponse.ok)throw engineDatabaseResponseFailure(probeResponse,probeBody,'the runtime-secret probe table');
+	if(!Array.isArray(probeBody)||probeBody.length!==1||probeBody[0]?.probe_key!=='runtime'||Number(probeBody[0]?.contract_version)!==1){
+		throw fail('Supabase did not accept the restricted OrbitFS database runtime secret.',409,'ENGINE_DATABASE_RUNTIME_SECRET_REJECTED');
+	}
+	for(const table of contract.runtimeSecretPreflightTables){
+		const url=new URL(`/rest/v1/${table}`,supabaseUrl);
 		url.searchParams.set('select','id');
 		url.searchParams.set('limit','1');
 		let response:Response;
 		try{
 			response=await fetch(url,{headers,cache:'no-store',signal:AbortSignal.timeout(10_000)});
 		}catch(error:any){
-			throw fail(`Shared Engine database preflight could not reach Supabase while checking the ${probe.label}: ${String(error?.message||error)}`,503,'ENGINE_DATABASE_PREFLIGHT_FAILED');
+			throw fail(`Shared Engine database preflight could not reach Supabase while checking ${table}: ${String(error?.message||error)}`,503,'ENGINE_DATABASE_PREFLIGHT_FAILED');
 		}
 		const body:any=await response.json().catch(()=>null);
-		if(!response.ok){
-			throw fail(`Shared Engine database preflight failed for the ${probe.label} with Supabase ${response.status}.`,503,'ENGINE_DATABASE_PREFLIGHT_FAILED');
-		}
+		if(!response.ok)throw engineDatabaseResponseFailure(response,body,table);
 		if(!Array.isArray(body)){
-			throw fail(`Shared Engine database preflight returned an invalid response for the ${probe.label}.`,503,'ENGINE_DATABASE_PREFLIGHT_FAILED');
+			throw fail(`Shared Engine database preflight returned an invalid response for ${table}.`,503,'ENGINE_DATABASE_PREFLIGHT_FAILED');
 		}
 	}
 }
-
 
 type PreparedEngineMigration={
 	id:string;
@@ -383,9 +618,11 @@ function preparedEngineMigrations(packageData:any,descriptor:any):PreparedEngine
 export async function inspectInstalledEngineDatabase() {
   const current=await getSharedEngineHostState();
   if(current.pendingDeploymentId) throw fail('Engine deployment is in progress.',409,'ENGINE_DATABASE_DEPLOYMENT_PENDING');
-  const latest=await fetchEngineBootstrapRelease(current.releaseChannel || null);
-  if(!current.releaseId) assertInitialEngineRelease(latest);
-  const state=await inspectEngineDatabaseMigrations(latest.package,latest.descriptor);
+  const authorizedLatest=await fetchEngineBootstrapRelease(current.releaseChannel || null);
+  if(!current.releaseId) assertInitialEngineRelease(authorizedLatest);
+  const latest=(await scopeEngineReleaseForInstalledLicenses(authorizedLatest,undefined)).release;
+  const databaseContract=await resolveEngineDatabaseContract(latest,latest.descriptor);
+  const state=await inspectEngineDatabaseMigrations(databaseContract.packageData,latest.descriptor);
   if(!state.trackingAvailable) throw fail('Apply the current approved Base schema before Engine migrations.',409,'ENGINE_DATABASE_MIGRATION_EXECUTOR_REQUIRED');
   const releaseMatches=current.releaseId===latest.descriptor.releaseId;
   return {
@@ -395,6 +632,37 @@ export async function inspectInstalledEngineDatabase() {
     missing:state.missing.map(({id,file,component,sha256})=>({id,file,component,sha256})),
     repairSupported:releaseMatches && ['orbitfs-store-package-v1','orbitfs-authorized-branch-v1'].includes(String(current.distribution)) && !latest.descriptor.requiresPanelUpdate
   };
+}
+
+async function resolveEngineDatabaseContract(_release:any,descriptor:any){
+	const components:string[]=[...new Set<string>((descriptor?.components||[]).map((item:any)=>String(item||'').trim().toLowerCase()).filter((item:string)=>ENGINE_COMPONENT_IDS.includes(item as any)))];
+	if(!components.length)throw fail('At least one Engine component is required before resolving its database package.',400,'ENGINE_DATABASE_COMPONENT_REQUIRED');
+	let registry:any;
+	try{
+		registry=await fetchEngineDatabasePackageSet(components);
+	}catch(error:any){
+		const code=String(error?.code||'').trim().toUpperCase();
+		if(code==='DATABASE_PACKAGE_NOT_FOUND'||code==='DATABASE_PACKAGE_FETCH_FAILED'||Number(error?.status||0)===404){
+			throw fail(
+				'No current central database package is published for the requested Engine component set.',
+				409,
+				'ENGINE_DATABASE_PACKAGE_REQUIRED'
+			);
+		}
+		throw error;
+	}
+	return{
+		packageData:{database:registry.database},
+		source:'license-manager-registry',
+		packages:registry.packages.map((item:any)=>({
+			id:item.id,
+			component:item.component,
+			databaseSchemaVersion:item.databaseSchemaVersion,
+			minimumBaseSchemaVersion:item.minimumBaseSchemaVersion,
+			sha256:item.sha256,
+			sourceCommit:item.sourceCommit
+		}))
+	};
 }
 
 function migrationTrackingMissing(error:any){
@@ -538,13 +806,17 @@ export async function engineHostProvisioningStatus() {
 	const credentials = await credentialsFrom();
 	const database=engineDatabaseCredentials();
 	const baseVersion=await resolveInstalledBaseVersion();
+	let licenseProviderAvailable=false;
+	try{licenseProviderAvailable=Boolean((await getLicenseProviderSettings()).providerBase);}catch{}
 	const missing:string[]=[];
 	if(!credentials.token) missing.push('Vercel connection');
 	if(!String(env.SUPABASE_URL||'').trim()) missing.push('SUPABASE_URL');
 	if(!String(env.SUPABASE_PUBLISHABLE_KEY||'').trim()) missing.push('SUPABASE_PUBLISHABLE_KEY');
 	if(database.mode==='missing') missing.push('database runtime credential');
+	if(database.mode!=='missing'&&!database.serviceKey) missing.push('Supabase server repair credential');
+	try{engineDatabaseRuntimeAccessContract();}catch{missing.push('License Manager database runtime access contract');}
 	if(!engineSharedSecret()) missing.push('Engine shared secret');
-	if(!String(env.ORBITFS_LICENSE_API_URL||'').trim()) missing.push('ORBITFS_LICENSE_API_URL');
+	if(!licenseProviderAvailable) missing.push('official licence provider');
 	return {available:missing.length===0,missing,vercelConnected:Boolean(credentials.token),databaseCredentialMode:database.mode==='server-secret'?(database.derived?'derived-server-secret':'server-secret'):database.mode,baseVersion,baseVersionKnown:Boolean(baseVersion)};
 }
 
@@ -568,10 +840,28 @@ async function finalizeReadyEngineRelease(host:any,input:{
 	distribution?:'orbitfs-store-package-v1'|'orbitfs-git-dev-v1'|'orbitfs-authorized-branch-v1';
 }) {
 	const components=[...new Set((input.components||[]).map((value)=>String(value||'').trim().toLowerCase()).filter(Boolean))];
+	const preparedAddons=await prepareInstalledEngineAddonLicenses();
+	const authorizedNow:string[]=[];
+	for(const component of components){
+		const manifest=CLOUD_ADDON_MANIFESTS[component];
+		const licenseComponent=String(manifest?.licenseComponent||'').trim();
+		if(!licenseComponent)throw fail('Engine component authorization mapping is missing: '+component,409,'ENGINE_COMPONENT_AUTHORIZATION_CHANGED');
+		try{
+			await assertAddonLicensed(licenseComponent,false);
+			authorizedNow.push(component);
+		}catch{
+			throw fail('Engine component authorization changed while the deployment was running: '+component,409,'ENGINE_COMPONENT_AUTHORIZATION_CHANGED');
+		}
+	}
 	const activeRelease=await getActiveRelease();
 	const previousEngine=activeRelease?.engine&&typeof activeRelease.engine==='object'?activeRelease.engine:{};
-	const mergedComponents=[...new Set([...(Array.isArray(previousEngine.components)?previousEngine.components:[]),...components].map((value)=>String(value||'').trim().toLowerCase()).filter((value)=>ENGINE_COMPONENT_IDS.includes(value as any)))];
-	const mergedComponentVersions={...(previousEngine.componentVersions&&typeof previousEngine.componentVersions==='object'?previousEngine.componentVersions:{}),...(input.componentVersions||{})};
+	const mergedComponents=[...new Set([...(Array.isArray(previousEngine.components)?previousEngine.components:[]),...components].map((value)=>String(value||'').trim().toLowerCase()).filter((value)=>authorizedNow.includes(value)))];
+	const mergedVersionsRaw:Record<string,unknown>={...(previousEngine.componentVersions&&typeof previousEngine.componentVersions==='object'?previousEngine.componentVersions:{}),...(input.componentVersions||{})};
+	const mergedComponentVersions:Record<string,string|null>=Object.fromEntries(
+		Object.entries(mergedVersionsRaw)
+			.filter(([component])=>mergedComponents.includes(String(component).toLowerCase()))
+			.map(([component,version])=>[String(component).toLowerCase(),version===null?null:String(version||'')||null])
+	);
 	const db=getSupabaseAdmin();
 
 	for(const id of components){
@@ -698,6 +988,37 @@ export async function registerSharedEngineUpdater(input: Record<string, any> = {
 		throw fail('Deploy the Shared Engine before registering it with the updater.',409,'ENGINE_HOST_NOT_DEPLOYED');
 	}
 	const channel=String(input.releaseChannel||input.channel||current.releaseChannel||env.ORBITFS_UPDATE_CHANNEL||'stable').trim().toLowerCase()||'stable';
+	if(current.distribution==='orbitfs-store-package-v1'){
+		const currentReleaseId=String(current.releaseId||'').trim();
+		if(!currentReleaseId)throw fail('The published Engine release identity is missing.',409,'ENGINE_RELEASE_ID_REQUIRED');
+		try{
+			const verified=await verifyEngineUpdaterRelease({releaseId:currentReleaseId,channel});
+			const host=await saveSharedEngineHostState({
+				releaseChannel:verified.channel,
+				updaterConnected:true,
+				updaterConnectedAt:current.updaterConnectedAt||new Date().toISOString(),
+				updaterProvider:verified.provider,
+				updaterProtocol:verified.protocol,
+				updaterLastVerifiedAt:verified.verifiedAt,
+				updaterLastError:null
+			},current);
+			await recordLicenseManagerCheckIn({
+				action:'check_in',phase:'completed',product:'orbitfs_base',
+				productVersion:String(env.ORBITFS_APP_VERSION||'').trim()||null,
+				releaseId:currentReleaseId,deploymentId:current.deploymentId,
+				deploymentUrl:current.deploymentUrl,projectId:current.projectId,projectName:current.projectName,
+				details:{deploymentProduct:'orbitfs_engine',engineVersion:current.releaseVersion,engineReady:true,updaterConnected:true,updaterProvider:verified.provider,updaterChannel:verified.channel,engineDeployerProtocol:verified.protocol,registrationSync:true,releaseSource:'published-update'}
+			});
+			return {host,synced:true,conflict:false,updateStarted:false,latest:{releaseId:currentReleaseId,version:current.releaseVersion,channel:verified.channel,source:'published-update'}};
+		}catch(error:any){
+			if(!authorityUnavailable(error))throw error;
+			const host=await saveSharedEngineHostState({
+				updaterConnected:false,updaterLastVerifiedAt:new Date().toISOString(),
+				updaterLastError:'Published Engine release authority temporarily unavailable.',lastError:null
+			},current);
+			return {host,synced:false,conflict:false,updateStarted:false,authorityUnavailable:true,fallback:'keep-current-release',latest:null,errorCode:String(error?.code||'ENGINE_RELEASE_UNAVAILABLE')};
+		}
+	}
 	let latest: Awaited<ReturnType<typeof fetchAuthorizedEngineBranch>>;
 	try {
 		latest=await fetchAuthorizedEngineBranch();
@@ -961,22 +1282,43 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 	const name = current.projectName || projectName(current.installationId);
 	// Both initial installs and updates use only authority-delivered artifacts.
 	const releaseChannel=String(input.releaseChannel||input.channel||current.releaseChannel||env.ORBITFS_UPDATE_CHANNEL||'stable').trim().toLowerCase()||'stable';
-	const preparedAddons=await prepareInstalledEngineAddonLicenses();
 	const requestedReleaseId=String(input.releaseId||'').trim();
-	const authorityRelease=await fetchAuthorizedEngineBranch();
-	const release=scopeEngineReleaseForExecution(authorityRelease,input.components);
-	if(requestedReleaseId && input.rollbackToCheckpoint!==true && release.descriptor.releaseId!==requestedReleaseId)
-		throw fail('Engine branch changed since planning; refresh and deploy the currently authorized source.',409,'ENGINE_SOURCE_STALE');
+	const requestedSourceCommit=String(input.sourceCommit||'').trim().toLowerCase();
+	const requestedSourceMode=String(input.releaseSource||'').trim().toLowerCase();
+	if(requestedSourceMode&&!['authorized-branch','published-update'].includes(requestedSourceMode)){
+		throw fail('Unsupported Engine release source.',400,'ENGINE_RELEASE_SOURCE_INVALID');
+	}
+	const branchRelease=requestedReleaseId.startsWith('github:lucaskerim123/V1-vercel-engine@');
+	const releaseSource=requestedSourceMode||(branchRelease?'authorized-branch':requestedReleaseId?'published-update':current.distribution==='orbitfs-store-package-v1'?'published-update':'authorized-branch');
+	if(releaseSource==='authorized-branch'&&input.rollbackToCheckpoint===true&&!/^[a-f0-9]{40}$/.test(requestedSourceCommit)){
+		throw fail('Engine branch rollback requires the previously authorized source commit recorded in its checkpoint.',409,'ENGINE_ROLLBACK_SOURCE_MISSING');
+	}
+	const publishedReleaseId=releaseSource==='published-update'?(requestedReleaseId||String(current.releaseId||'').trim()):'';
+	if(releaseSource==='published-update'&&!publishedReleaseId){
+		throw fail('A published Engine release ID is required for this deployment.',409,'ENGINE_RELEASE_ID_REQUIRED');
+	}
+	const authorityRelease=releaseSource==='published-update'
+		?await fetchLatestEngineRelease({releaseId:publishedReleaseId,channel:releaseChannel})
+		:await fetchAuthorizedEngineBranch(requestedSourceCommit?{sourceCommit:requestedSourceCommit}:{});
+	const scoped=await scopeEngineReleaseForInstalledLicenses(authorityRelease,input.components);
+	const release=scoped.release;
+	const preparedAddons=scoped.preparedAddons;
+	const deploymentDistribution=releaseSource==='published-update'?'orbitfs-store-package-v1':'orbitfs-authorized-branch-v1';
+	if(requestedReleaseId && release.descriptor.releaseId!==requestedReleaseId)
+		throw fail('Engine source does not match the requested release identity.',409,'ENGINE_SOURCE_STALE');
 	if (release.installationId !== current.installationId) {
 		throw fail('Engine release was authorized for a different OrbitFS installation.', 409, 'ENGINE_RELEASE_INSTALLATION_MISMATCH');
 	}
 	const descriptor = release.descriptor;
 	const installedBaseVersion=await resolveInstalledBaseVersion();
 	const databaseCredential=await prepareEngineDatabaseCredential();
-	const environmentVariables = await requiredEngineEnvironment({version:descriptor.version,releaseId:descriptor.releaseId,channel:descriptor.channel,projectName:name,baseVersion:installedBaseVersion,installationId:current.installationId},databaseCredential);
-	await assertEngineDatabaseAccess(databaseCredential);
+	const databaseAccessContract=engineDatabaseRuntimeAccessContract();
+	await repairEngineDatabaseRuntimeAccess(databaseCredential,databaseAccessContract);
+	await assertEngineDatabaseAccess(databaseCredential,databaseAccessContract);
+	const environmentVariables = await requiredEngineEnvironment({version:descriptor.version,releaseId:descriptor.releaseId,channel:descriptor.channel,projectName:name,baseVersion:installedBaseVersion,installationId:current.installationId},databaseCredential,databaseAccessContract);
 	if (!current.releaseId) assertInitialEngineRelease(release);
-	const migrationState=await inspectEngineDatabaseMigrations(release.package,descriptor);
+	const databaseContract=await resolveEngineDatabaseContract(release,descriptor);
+	const migrationState=await inspectEngineDatabaseMigrations(databaseContract.packageData,descriptor);
 	if (descriptor.requiresPanelUpdate && String(env.ORBITFS_UPDATE_RELEASE_ID || '').trim() !== descriptor.releaseId && input.rollbackToCheckpoint!==true) {
 		throw fail(
 			`Engine release ${descriptor.version} is part of a mixed Base + Engine update. Apply the full Update release through the customer update system before updating the Shared Engine.`,
@@ -1018,6 +1360,8 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 		});
 	}
 	const databaseMigrations=await applyEngineDatabaseMigrations(migrationState,descriptor);
+	await repairEngineDatabaseRuntimeAccess(databaseCredential,databaseAccessContract);
+	await assertEngineDatabaseAccess(databaseCredential,databaseAccessContract);
 	if(cleanDeploymentNoOp){
 		return { ...current, updatePlan, noOp: true, databaseMigrations };
 	}
@@ -1032,7 +1376,7 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 	};
 
 	await saveSharedEngineHostState({
-		state: 'provisioning', installationRoute: installation.route, panelUrl, projectName: name, distribution: 'orbitfs-authorized-branch-v1',
+		state: 'provisioning', installationRoute: installation.route, panelUrl, projectName: name, distribution: deploymentDistribution,
 		pendingDeploymentId:null,
 		pendingDeploymentUrl:null,
 		pendingReleaseVersion:descriptor.version,
@@ -1119,7 +1463,7 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 			target: 'production',
 			projectSettings,
 			meta: {
-				orbitfsDistribution: 'store-package-v1',
+				orbitfsDistribution: deploymentDistribution,
 				orbitfsInstallationId: current.installationId,
 				orbitfsReleaseVersion: descriptor.version,
 				orbitfsReleaseId: descriptor.releaseId,
@@ -1135,13 +1479,13 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 		const readyState = deploymentReadyState(deployment);
 		const effectiveSourceCommit=descriptor.sourceCommit;
 		const effectiveSha256=descriptor.sha256;
-		await recordLicenseManagerCheckIn({action:'update',phase:'started',product:'orbitfs_base',productVersion:String(env.ORBITFS_APP_VERSION||'').trim()||null,releaseId:descriptor.releaseId,deploymentId:String(deployment?.id||'')||null,deploymentUrl:publicVercelUrl(deployment?.url),projectId,projectName:name,details:{deploymentProduct:'orbitfs_engine',engineVersion:descriptor.version,readyState,targetComponents:descriptor.components,components:release.package.componentVersions||{},preparedAddons,databaseMigrations:databaseMigrations.map((migration:any)=>({id:migration.id,file:migration.file,component:migration.component,sha256:migration.sha256}))}});
+		await recordLicenseManagerCheckIn({action:'update',phase:'started',product:'orbitfs_base',productVersion:String(env.ORBITFS_APP_VERSION||'').trim()||null,releaseId:descriptor.releaseId,deploymentId:String(deployment?.id||'')||null,deploymentUrl:publicVercelUrl(deployment?.url),projectId,projectName:name,details:{deploymentProduct:'orbitfs_engine',engineVersion:descriptor.version,readyState,targetComponents:descriptor.components,components:release.package.componentVersions||{},preparedAddons,databasePackageSource:databaseContract.source,databasePackages:databaseContract.packages,databaseMigrations:databaseMigrations.map((migration:any)=>({id:migration.id,file:migration.file,component:migration.component,sha256:migration.sha256}))}});
 		const aliases = Array.isArray(deployment?.alias) ? deployment.alias : [];
 		const hostUrl = publicVercelUrl(aliases[0] || project?.alias?.[0] || `${name}.vercel.app`);
 		const deploymentUrl = publicVercelUrl(deployment?.url);
 		const savedHost = await saveSharedEngineHostState({
 			state: readyState === 'READY' ? 'deployed' : 'provisioning', installationRoute: installation.route, panelUrl, hostUrl, projectId, projectName: name,
-			distribution: 'orbitfs-authorized-branch-v1',
+			distribution: deploymentDistribution,
 			pendingDeploymentId:String(deployment?.id||'')||null,
 			pendingDeploymentUrl:deploymentUrl,
 			pendingReleaseVersion:descriptor.version,
@@ -1172,7 +1516,7 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 				deploymentId:String(deployment?.id||'')||null,
 				deploymentUrl,
 				verifyUpdater:true,
-				distribution:'orbitfs-authorized-branch-v1'
+				distribution:deploymentDistribution
 			});
 			await recordLicenseManagerCheckIn({action:'update',phase:'completed',product:'orbitfs_base',productVersion:String(env.ORBITFS_APP_VERSION||'').trim()||null,releaseId:descriptor.releaseId,deploymentId:String(deployment?.id||'')||null,deploymentUrl,projectId,projectName:name,details:{deploymentProduct:'orbitfs_engine',engineVersion:descriptor.version,readyState,targetComponents:descriptor.components,components:release.package.componentVersions||{},updaterConnected:finalized.updaterConnected}});
 			return { ...finalized, updatePlan, databaseMigrations };

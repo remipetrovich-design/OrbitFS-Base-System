@@ -13,7 +13,7 @@ function readSchemaVersion() {
   const explicit = String(arg('schema-version', process.env.ORBITFS_SCHEMA_VERSION || '')).trim();
   if (explicit) return explicit;
   const envPath = resolve(ROOT, '.env.example');
-  if (!existsSync(envPath)) return '1';
+  if (!existsSync(envPath)) return '2';
   const match = readFileSync(envPath, 'utf8').match(/^ORBITFS_SCHEMA_VERSION=(.+)$/m);
   return String(match?.[1] || '1').trim().replace(/^["']|["']$/g, '') || '1';
 }
@@ -159,6 +159,26 @@ const compatibilityPrelude = [
   ''
 ].join('\n');
 
+const componentBoundary = {
+  format: 'orbitfs-database-component-boundary-v1',
+  freshInstallOnly: true,
+  owner: 'base',
+  excludedComponents: ['engine-shared', 'mcp', 'apex', 'studio'],
+  excludedTablePrefixes: ['mcp_', 'apex_', 'studio_'],
+  excludedRoutinePrefixes: ['mcp_', 'apex_', 'studio_', 'orbitfs_mcp_', 'orbitfs_apex_', 'orbitfs_studio_'],
+  legacyMigrationHistoryRetained: true
+};
+
+const componentBoundaryCleanup = [
+  '',
+  '-- OrbitFS fresh-install component boundary.',
+  '-- Historical migrations above remain immutable lineage. This cleanup is part of',
+  '-- the composed fresh-install Base snapshot only and is never a forward migration.',
+  '-- Engine/add-on schema is installed later from the central database registry.',
+  "do language plpgsql 'declare item record; begin for item in select schemaname, viewname as object_name from pg_views where schemaname=''public'' and (left(viewname,4)=''mcp_'' or left(viewname,5)=''apex_'' or left(viewname,7)=''studio_'') loop execute format(''drop view if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select schemaname, matviewname as object_name from pg_matviews where schemaname=''public'' and (left(matviewname,4)=''mcp_'' or left(matviewname,5)=''apex_'' or left(matviewname,7)=''studio_'') loop execute format(''drop materialized view if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select schemaname, tablename as object_name from pg_tables where schemaname=''public'' and (left(tablename,4)=''mcp_'' or left(tablename,5)=''apex_'' or left(tablename,7)=''studio_'') loop execute format(''drop table if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select n.nspname as schema_name,p.proname,pg_get_function_identity_arguments(p.oid) as args,p.prokind from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname=''public'' and (left(p.proname,4)=''mcp_'' or left(p.proname,5)=''apex_'' or left(p.proname,7)=''studio_'' or left(p.proname,12)=''orbitfs_mcp_'' or left(p.proname,13)=''orbitfs_apex_'' or left(p.proname,15)=''orbitfs_studio_'') loop if item.prokind=''p'' then execute format(''drop procedure if exists %I.%I(%s) cascade'',item.schema_name,item.proname,item.args); else execute format(''drop function if exists %I.%I(%s) cascade'',item.schema_name,item.proname,item.args); end if; end loop; end';",
+  ''
+].join('\n');
+
 const compatibilityCleanup = [
   '',
   '-- Remove only the compatibility shim created above; preserve any real pre-existing function.',
@@ -182,14 +202,52 @@ const header = [
   ''
 ].join('\n');
 
-const body = migrations.map((migration) => [
+function normalizeFreshInstallMigrationSql(input, migrationFile) {
+  let sql = String(input || '').replace(/\r\n/g, '\n');
+  sql = sql.replace(
+    /on\s+conflict\s*\(\s*workspace_id\s*,\s*user_id\s*\)\s+do\s+nothing/ig,
+    'on conflict do nothing'
+  );
+  sql = sql.replace(
+    /alter\s+table\s+([a-z0-9_.]+)\s+add\s+constraint\s+([a-z0-9_]+)\s+unique\s*\(([^;]+)\)\s*;/ig,
+    (_match, tableName, constraintName, columns) => {
+      const parts = String(tableName).split('.');
+      const schemaName = parts.length > 1 ? parts[0] : 'public';
+      return [
+        `alter table ${tableName} drop constraint if exists ${constraintName};`,
+        `drop index if exists ${schemaName}.${constraintName};`,
+        `alter table ${tableName} add constraint ${constraintName} unique (${String(columns).trim()});`
+      ].join('\n');
+    }
+  );
+  return sql;
+}
+
+const normalizedMigrations = migrations.map((migration) => ({
+  ...migration,
+  snapshotSql: normalizeFreshInstallMigrationSql(migration.data.toString('utf8'), migration.file)
+}));
+
+const body = normalizedMigrations.map((migration) => [
   `-- >>> BEGIN ${migration.file}`,
-  migration.data.toString('utf8').trimEnd(),
+  migration.snapshotSql.trimEnd(),
   `-- <<< END ${migration.file}`,
   ''
 ].join('\n')).join('\n');
 
-const sql = `${header}\n${compatibilityPrelude}\n${body}\n${compatibilityCleanup}`.replace(/\r\n/g, '\n');
+const sql = `${header}\n${compatibilityPrelude}\n${body}\n${compatibilityCleanup}\n${componentBoundaryCleanup}`.replace(/\r\n/g, '\n');
+
+if (/on\s+conflict\s*\(\s*workspace_id\s*,\s*user_id\s*\)\s+do\s+nothing/i.test(sql)) {
+  throw new Error('Fresh-install snapshot still contains the obsolete profile-state conflict target.');
+}
+const unsafeUniqueAdds = [...sql.matchAll(/alter\s+table\s+([a-z0-9_.]+)\s+add\s+constraint\s+([a-z0-9_]+)\s+unique\s*\(/ig)]
+  .filter((match) => {
+    const before = sql.slice(Math.max(0, (match.index || 0) - 300), match.index || 0).toLowerCase();
+    return !before.includes(`drop constraint if exists ${String(match[2]).toLowerCase()}`);
+  });
+if (unsafeUniqueAdds.length) {
+  throw new Error(`Fresh-install snapshot contains a non-replay-safe UNIQUE constraint: ${unsafeUniqueAdds[0][2]}`);
+}
 const requiredTables = [
   'orbitfs_users',
   'orbitfs_workspaces',
@@ -240,7 +298,8 @@ const metadata = {
   migrationRootSha256: migrationChain.rootSha256,
   latestMigration: migrationChain.latestMigration,
   migrations: migrationInventory,
-  migrationChain
+  migrationChain,
+  componentBoundary
 };
 
 const metadataArg = arg('metadata', '');

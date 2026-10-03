@@ -82,7 +82,7 @@ jobs:
           TARGET_SHA: ${{ steps.source.outputs.target_sha }}
         run: |
           set -euo pipefail
-          node tools/build-customer-schema.mjs --schema-version 1 --output supabase/customer-schema.sql --metadata /tmp/orbitfs-database-schema.json
+          node tools/build-customer-schema.mjs --schema-version 2 --output supabase/customer-schema.sql --metadata /tmp/orbitfs-database-schema.json
           test -s supabase/customer-schema.sql
           test "$(jq -r '.migrationCount' /tmp/orbitfs-database-schema.json)" -gt 0
           test "$(jq -r '.sha256' /tmp/orbitfs-database-schema.json | wc -c)" -eq 65

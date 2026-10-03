@@ -5,6 +5,7 @@
 	import { Button, Card, CardContent } from '$lib/components/ui';
 	import { CheckCircle2, CircleAlert, Cloud, Database, HardDrive, KeyRound, LoaderCircle, RefreshCw, UserPlus, Workflow } from '@lucide/svelte';
 
+	const LICENSE_KEY_PATTERN = /^LIC-[A-Z0-9]{10}-[A-Z0-9]{10}-[A-Z0-9]{10}$/;
 	type SetupItem = { title: string; description: string; complete: boolean };
 	type SetupConfig = {
 		setupComplete: boolean;
@@ -28,6 +29,8 @@
 
 	let loading = $state(true);
 	let working = $state(false);
+	let activating = $state(false);
+	let licenseKey = $state('');
 	let error = $state('');
 	let model = $state<SetupConfig | null>(null);
 	onMount(load);
@@ -55,6 +58,32 @@
 			error = err instanceof ApiError ? err.message : 'Could not prepare OrbitFS Base';
 		} finally {
 			working = false;
+		}
+	}
+
+	async function activateLicense(event: SubmitEvent) {
+		event.preventDefault();
+		const key = licenseKey.trim().toUpperCase();
+		if (!LICENSE_KEY_PATTERN.test(key)) {
+			error = 'Invalid licence key format. Use LIC-XXXXXXXXXX-XXXXXXXXXX-XXXXXXXXXX.';
+			return;
+		}
+		activating = true;
+		error = '';
+		try {
+			const response = await fetch('/api/license/activate', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ licenseKey: key })
+			});
+			const payload = await response.json().catch(() => ({}));
+			if (!response.ok) throw new Error(payload?.error || payload?.code || 'Licence activation failed');
+			licenseKey = '';
+			await load();
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Licence activation failed';
+		} finally {
+			activating = false;
 		}
 	}
 
@@ -126,6 +155,13 @@
 				<div class="flex flex-wrap gap-2">
 					{#if model.currentStep === 'core'}
 						<Button onclick={bootstrap} disabled={working}>{#if working}<LoaderCircle class="size-4 animate-spin" />{/if}Prepare Base</Button>
+					{:else if model.currentStep === 'license'}
+						<form class="w-full space-y-3" onsubmit={activateLicense}>
+							<label class="block text-sm font-medium" for="setup-license-key">OrbitFS licence key</label>
+							<input id="setup-license-key" class="h-11 w-full rounded-md border border-input bg-background px-3 font-mono text-sm" bind:value={licenseKey} autocomplete="off" spellcheck="false" placeholder="LIC-XXXXXXXXXX-XXXXXXXXXX-XXXXXXXXXX" maxlength="36" />
+							<p class="text-xs text-muted-foreground">Enter the licence key here on the deployed Base. Billing Store never receives or stores this key.</p>
+							<Button type="submit" disabled={activating || !licenseKey.trim()}>{#if activating}<LoaderCircle class="size-4 animate-spin" />{/if}<KeyRound class="size-4" />Activate licence</Button>
+						</form>
 					{:else if model.currentStep === 'owner'}
 						<Button onclick={() => goto('/setup/owner')}><UserPlus class="size-4" />Create first Owner</Button>
 					{:else if model.currentStep === 'workspace'}

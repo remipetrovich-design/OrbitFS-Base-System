@@ -8,12 +8,6 @@ import {
 	resolvedSharedEngineHostUrl
 } from '$lib/server/engine-host-state';
 
-// Legacy constants are retained only for source compatibility. Runtime code must
-// resolve the installation-specific Engine Host from stored host state.
-export const ENGINE_HOST_URL = 'https://orbitfsengine.vercel.app';
-export const ENGINE_HOST_PREVIEW_URL = 'https://orbitfsengine-git-engine-hub-v2-lucaskerim123s-projects.vercel.app';
-export const PANEL_URL = 'https://orbitfs.vercel.app';
-
 export type EngineMode = 'running' | 'standby' | 'stopped';
 
 type EngineState = {
@@ -91,10 +85,11 @@ export async function getEngineAttachContext(engineId: string, actorUserId: stri
 	}
 	const db = getSupabaseAdmin();
 	const workspace = await mainWorkspace();
-	const { data: row, error: rowError } = await db.from('orbitfs_addons').select('id,name,installed').eq('id', engineId).maybeSingle();
+	const { data: row, error: rowError } = await db.from('orbitfs_addons').select('id,name,installed,runtime').eq('id', engineId).maybeSingle();
 	if (rowError) throw rowError;
-	if (!row || row.installed !== true) {
-		throw Object.assign(new Error('Install the engine before attaching it'), { status: 409, code: 'ENGINE_NOT_INSTALLED' });
+	const pendingInstall=runtimeOf(row?.runtime).pendingInstall===true;
+	if (!row || (row.installed !== true && !pendingInstall)) {
+		throw Object.assign(new Error('Install the engine or start its pending installation before attaching it'), { status: 409, code: 'ENGINE_NOT_INSTALLED' });
 	}
 	const { data: actor, error: actorError } = await db.from('orbitfs_users').select('id,username,status').eq('id', actorUserId).maybeSingle();
 	if (actorError) throw actorError;

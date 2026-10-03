@@ -29,6 +29,11 @@ export async function fetchAuthorizedEngineBranch(selection: { sourceCommit?: st
     accept: 'application/json',
   };
   const url = await sourceUrl();
+  const requested = String(selection.sourceCommit || '').trim().toLowerCase();
+  if (requested) {
+    if (!/^[a-f0-9]{40}$/.test(requested)) throw fail('ENGINE_SOURCE_SHA_INVALID', 400);
+    url.searchParams.set('sha', requested);
+  }
   const metadata = await fetch(url, { headers, cache: 'no-store', signal: AbortSignal.timeout(90_000) });
   const body: any = await metadata.json().catch(() => ({}));
   if (!metadata.ok || !body?.ok || !body?.release)
@@ -41,7 +46,6 @@ export async function fetchAuthorizedEngineBranch(selection: { sourceCommit?: st
     String(item.sourceRef) !== 'UPDATE_RELEASE' ||
     String(item.id) !== 'github:lucaskerim123/V1-vercel-engine@' + sha)
     throw fail('ENGINE_SOURCE_DESCRIPTOR_INVALID', 502);
-  const requested = String(selection.sourceCommit || '').trim().toLowerCase();
   if (requested && requested !== sha) throw fail('ENGINE_SOURCE_STALE', 409);
   url.searchParams.set('sha', sha);
   url.searchParams.set('download', '1');
@@ -69,8 +73,7 @@ export async function fetchAuthorizedEngineBranch(selection: { sourceCommit?: st
     minimumBaseVersion: String(item.minimumBaseVersion || ''), distribution: 'orbitfs-store-package-v1',
   };
   const packageData: any = parsePackage(archive, descriptor);
-  if (packageData.sourceCommit !== sha || packageData.releaseId !== descriptor.releaseId ||
-    !packageData.database || packageData.database.migrationCount < 1)
+  if (packageData.sourceCommit !== sha || packageData.releaseId !== descriptor.releaseId)
     throw fail('ENGINE_SOURCE_PACKAGE_INVALID', 502);
   return {
     installationId: identity.installationId,

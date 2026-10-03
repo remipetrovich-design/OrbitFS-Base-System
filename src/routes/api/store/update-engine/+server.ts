@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { json } from '@sveltejs/kit';
 import { ensureInstallationIdentity } from '$lib/server/license';
-import { ENGINE_DEPLOYER_PROTOCOL, provisionSharedEngineHost, refreshSharedEngineDeployment, scopeEngineReleaseForExecution } from '$lib/server/vercel-engine-provision';
+import { ENGINE_DEPLOYER_PROTOCOL, provisionSharedEngineHost, refreshSharedEngineDeployment, scopeEngineReleaseForInstalledLicenses } from '$lib/server/vercel-engine-provision';
 import { getSharedEngineHostState, saveSharedEngineHostState } from '$lib/server/engine-host-state';
 import { findEngineRollbackCheckpoint } from '$lib/server/update-checkpoints';
 import { confirmSharedEngineHostLink } from '$lib/server/engine-host-remote';
@@ -75,7 +75,7 @@ export async function POST({request}:any){
 		if(!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(releaseChannel)) return fail('Release channel is invalid',400,'STORE_UPDATE_CHANNEL_INVALID');
 
 		if(mode==='plan'){
-			const release=scopeEngineReleaseForExecution(await fetchLatestEngineRelease({releaseId,channel:releaseChannel}),body.components);
+			const release=(await scopeEngineReleaseForInstalledLicenses(await fetchLatestEngineRelease({releaseId,channel:releaseChannel}),body.components)).release;
 			if(release.descriptor.requiresPanelUpdate&&String(env.ORBITFS_UPDATE_RELEASE_ID||'').trim()!==release.descriptor.releaseId){
 				return fail(`Update ${release.descriptor.version} also changes OrbitFS Base. Apply the Base portion of this exact Update release before planning the Engine portion.`,409,'ENGINE_UPDATE_PANEL_REQUIRED');
 			}
@@ -94,8 +94,13 @@ export async function POST({request}:any){
 			const current=await getSharedEngineHostState();
 			const rollback=await findEngineRollbackCheckpoint(current.releaseId);
 			if(!rollback) return fail('No previous Engine checkpoint is available to restore.',409,'ENGINE_ROLLBACK_CHECKPOINT_MISSING');
+			const rollbackSource=rollback.distribution==='orbitfs-store-package-v1'?'published-update':'authorized-branch';
+			if(rollbackSource==='authorized-branch'&&!rollback.sourceCommit) return fail('The rollback checkpoint does not contain a previously authorized Engine source commit.',409,'ENGINE_ROLLBACK_SOURCE_MISSING');
 			const restored=await provisionSharedEngineHost({
 				releaseId:rollback.releaseId,
+				releaseSource:rollbackSource,
+				...(rollback.sourceCommit?{sourceCommit:rollback.sourceCommit}:{}),
+				components:rollback.components,
 				releaseChannel:rollback.channel||current.releaseChannel||releaseChannel,
 				reconcileToAuthority:true,
 				rollbackToCheckpoint:true,
@@ -119,6 +124,7 @@ export async function POST({request}:any){
 
 		const host=await provisionSharedEngineHost({
 			releaseId,
+			releaseSource:'published-update',
 			releaseChannel,
 			components:body.components,
 			vercelToken:String(body.vercelToken||'').trim(),

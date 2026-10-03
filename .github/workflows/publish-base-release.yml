@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           node tools/build-customer-schema.mjs \
-            --schema-version "${ORBITFS_SCHEMA_VERSION:-1}" \
+            --schema-version "${ORBITFS_SCHEMA_VERSION:-2}" \
             --output supabase/customer-schema.sql \
             --metadata orbitfs-database-schema.json
           test -s supabase/customer-schema.sql
@@ -149,13 +149,28 @@ jobs:
             const sha=crypto.createHash('sha256').update(data).digest('hex');
             if(data.length!==Number(f.size)||sha!==String(f.sha256||'').toLowerCase())throw new Error('Base file integrity failure: '+f.file);
           }
-          for(const required of ['package.json','svelte.config.js','tools/prepare-license-runtime.mjs','deployment/base-environment.json','supabase/customer-schema.sql']){
-            if(!seen.has(required))throw new Error('Missing required Base file: '+required);
+          for(const required of [
+            'package.json','package-lock.json','svelte.config.js','vite.config.ts',
+            'tools/prepare-license-runtime.mjs','deployment/base-environment.json','supabase/customer-schema.sql',
+            'src/lib/server/vercel-engine-provision.ts','src/lib/server/engine-host.ts',
+            'src/lib/server/engine-release-client.ts','src/lib/server/engine-update-planner.ts',
+            'src/lib/server/license.ts','src/lib/server/runtime-secrets.ts',
+            'src/routes/api/engine-host/+server.ts','src/routes/api/engine-host/[action]/+server.ts',
+            'src/routes/api/engine-host/launch/+server.ts','src/routes/api/engine-license/+server.ts',
+            'src/routes/api/license/activate/+server.ts','src/routes/api/license/status/+server.ts',
+            'src/hooks.server.ts','src/routes/setup/+page.svelte','src/routes/setup/owner/+page.svelte',
+            'src/routes/api/setup/[...rest]/+server.ts','src/routes/api/setup/status/+server.ts',
+            'src/routes/api/setup/owner/+server.ts','src/routes/api/store/update-engine/+server.ts'
+          ]){
+            if(!seen.has(required))throw new Error('Missing required Base runtime/deployer file: '+required);
           }
           if(!String(pkg.databaseSchemaVersion||'')||pkg.databaseSchemaPath!=='supabase/customer-schema.sql'||!/^[a-f0-9]{64}$/i.test(String(pkg.databaseSchemaSha256||'')))throw new Error('Base database snapshot metadata is invalid');
           if(!Number.isInteger(Number(pkg.databaseMigrationCount))||Number(pkg.databaseMigrationCount)<1||!/^\d{14}$/.test(String(pkg.databaseLatestMigration||'')))throw new Error('Base migration metadata is invalid');
           if(!Array.isArray(pkg.databaseMigrations)||pkg.databaseMigrations.length!==Number(pkg.databaseMigrationCount))throw new Error('Base database migration inventory is incomplete');
           if(!/^\d{14}$/.test(String(pkg.databaseMigrationRoot||''))||!/^[a-f0-9]{64}$/i.test(String(pkg.databaseMigrationRootSha256||'')))throw new Error('Base database migration root is invalid');
+          const boundary=pkg.databaseComponentBoundary;
+          if(boundary?.format!=='orbitfs-database-component-boundary-v1'||boundary?.freshInstallOnly!==true||boundary?.owner!=='base')throw new Error('Base database component boundary is invalid');
+          if(!Array.isArray(boundary.excludedComponents)||!['engine-shared','mcp','apex','studio'].every(x=>boundary.excludedComponents.includes(x)))throw new Error('Base database component exclusions are incomplete');
           const chain=pkg.databaseMigrationChain;
           if(chain?.format!=='orbitfs-base-migration-chain-v1'||chain?.complete!==true||chain?.baseline!==true||Number(chain?.migrationCount)!==Number(pkg.databaseMigrationCount))throw new Error('Base database migration chain contract is incomplete');
           if(String(chain.rootMigration)!==String(pkg.databaseMigrationRoot)||String(chain.rootSha256).toLowerCase()!==String(pkg.databaseMigrationRootSha256).toLowerCase()||String(chain.latestMigration)!==String(pkg.databaseLatestMigration))throw new Error('Base database migration chain metadata is inconsistent');
@@ -164,6 +179,39 @@ jobs:
           if(String(first?.id)!==String(pkg.databaseMigrationRoot)||String(first?.sha256).toLowerCase()!==String(pkg.databaseMigrationRootSha256).toLowerCase()||String(last?.id)!==String(pkg.databaseLatestMigration))throw new Error('Base database migration chain endpoints do not match the inventory');
           const schema=pkg.files.find(f=>f.file===pkg.databaseSchemaPath);
           if(schema.sha256!==String(pkg.databaseSchemaSha256).toLowerCase())throw new Error('Base schema checksum does not match packaged snapshot');
+          const schemaSql=Buffer.from(schema.data,'base64').toString('utf8');
+          for(const marker of [
+            'orbitfs_repair_runtime_access',
+            'orbitfs_runtime_secret_probe',
+            'private.orbitfs_server_secret_valid',
+            'orbitfs runtime secret access',
+            'orbitfs runtime secret required'
+          ]){
+            if(!schemaSql.includes(marker))throw new Error('Base customer schema is missing runtime database contract marker: '+marker);
+          }
+          const inner=pkg.files.find(f=>f.file==='src/lib/server/vercel-engine-provision.ts');
+          const innerSource=inner?Buffer.from(inner.data,'base64').toString('utf8'):'';
+          for(const marker of [
+            'ORBITFS_DATABASE_RUNTIME_ACCESS_CONTRACT',
+            'ENGINE_DATABASE_RUNTIME_ACCESS_REPAIR_UNAVAILABLE',
+            'runtimeSecretProbeTable',
+            'repairEngineDatabaseRuntimeAccess',
+            'ORBITFS_SUPABASE_CONNECTION_ATTESTATION',
+            'ENGINE_SUPABASE_PROJECT_MISMATCH',
+            'ENGINE_SUPABASE_PUBLISHABLE_KEY_MISMATCH',
+            'ENGINE_SUPABASE_SERVER_KEY_MISMATCH',
+            'ENGINE_DATABASE_PUBLISHABLE_KEY_REJECTED',
+            'ENGINE_DATABASE_SERVER_KEY_REJECTED'
+          ]){
+            if(!innerSource.includes(marker))throw new Error('Inner Engine deployer is missing runtime database contract marker: '+marker);
+          }
+          if(innerSource.includes('legacy-service-key-fallback'))throw new Error('Inner Engine deployer still contains the legacy service-key fallback');
+          const envFile=pkg.files.find(f=>f.file==='deployment/base-environment.json');
+          const envContract=envFile?JSON.parse(Buffer.from(envFile.data,'base64').toString('utf8')):null;
+          const envNames=new Set((Array.isArray(envContract?.variables)?envContract.variables:[]).map(item=>String(item?.name||'')));
+          for(const name of ['SUPABASE_URL','SUPABASE_PUBLISHABLE_KEY','SUPABASE_SECRET_KEY','ORBITFS_SUPABASE_CONNECTION_ATTESTATION','ORBITFS_DB_SECRET']){
+            if(!envNames.has(name))throw new Error('Base deployment environment contract is missing '+name);
+          }
           console.log('Base deployment artifact validated:',pkg.version,'files='+pkg.fileCount,'migrations='+pkg.databaseMigrationCount);
           NODE
 
@@ -215,6 +263,33 @@ jobs:
           )"
           echo "url=$normalized" >> "$GITHUB_OUTPUT"
 
+      - name: Register Base database package candidate
+        id: database-package
+        env:
+          LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
+          LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$LICENSE_MASTER_API_TOKEN" || { echo "::error::Missing LICENSE_MASTER_API_TOKEN repository secret."; exit 1; }
+          schema_version="${ORBITFS_SCHEMA_VERSION:-}"
+          if [ -z "$schema_version" ]; then schema_version="2"; fi
+          node tools/build-database-package.mjs \
+            --commit "$SOURCE_SHA" \
+            --schema-version "$schema_version" \
+            --snapshot supabase/customer-schema.sql \
+            --metadata orbitfs-database-schema.json \
+            --output base-database-package.json
+          test -s base-database-package.json
+          response="$(curl --fail-with-body --silent --show-error -X POST "$LICENSE_MASTER_URL/database-packages" \
+            -H "Authorization: Bearer $LICENSE_MASTER_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @base-database-package.json)"
+          reference="$(jq -c '{id:.package.id,component:.package.component,databaseSchemaVersion:.package.databaseSchemaVersion,sha256:.package.sha256,sourceCommit:.package.sourceCommit}' <<<"$response")"
+          test "$(jq -r '.component' <<<"$reference")" = "base" || { echo "::error::License Manager returned an invalid Base database package."; exit 1; }
+          echo "reference=$reference" >> "$GITHUB_OUTPUT"
+
       - name: Validate Base release channel
         env:
           LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
@@ -263,6 +338,7 @@ jobs:
           ARTIFACT: ${{ steps.package.outputs.artifact }}
           ARTIFACT_URL: ${{ steps.github-release.outputs.asset_url }}
           ARTIFACT_TAG: ${{ steps.github-release.outputs.tag }}
+          DATABASE_PACKAGE_REFERENCE: ${{ steps.database-package.outputs.reference }}
         shell: bash
         run: |
           set -euo pipefail
@@ -291,8 +367,13 @@ jobs:
             databaseLatestMigration:pkg.databaseLatestMigration,
             databaseMigrations:pkg.databaseMigrations,
             databaseMigrationChain:pkg.databaseMigrationChain,
+            databaseComponentBoundary:pkg.databaseComponentBoundary,
             database:pkg.database,
             databaseCompatibility:pkg.databaseCompatibility,
+            databasePackages:{
+              format:'orbitfs-database-package-set-v1',
+              packages:[JSON.parse(process.env.DATABASE_PACKAGE_REFERENCE)]
+            },
             rollbackPolicy:pkg.rollbackPolicy,
             releaseLifecycle:pkg.releaseLifecycle,
             artifactTag:process.env.ARTIFACT_TAG

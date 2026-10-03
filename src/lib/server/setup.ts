@@ -18,8 +18,9 @@ export async function getInstallationRoute() {
 	const result = await db.from('orbitfs_settings').select('value').eq('scope_type', 'global').eq('scope_id', '').eq('key', INSTALLATION_ROUTE_KEY).maybeSingle();
 	if (result.error) throw result.error;
 	const value = result.data?.value;
+	const runtimeRoute = normalizeInstallationRoute(env.ORBITFS_INSTALLATION_ROUTE);
 	return {
-		route: normalizeInstallationRoute((value as any)?.route),
+		route: normalizeInstallationRoute((value as any)?.route || runtimeRoute),
 		registered: Boolean(value && typeof value === 'object' && (value as any).registeredAt),
 		registeredAt: value && typeof value === 'object' ? String((value as any).registeredAt || '') || null : null,
 		registeredBy: value && typeof value === 'object' ? String((value as any).registeredBy || '') || null : null,

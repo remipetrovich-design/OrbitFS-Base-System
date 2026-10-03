@@ -1,6 +1,3 @@
-import { apexAddonManifest } from '../../../addons/apex/manifest';
-import { mcpAddonManifest } from '../../../addons/mcp/manifest';
-
 export type PanelAddonManifest = {
 	id: string;
 	name: string;
@@ -10,8 +7,9 @@ export type PanelAddonManifest = {
 };
 
 const manifests = new Map<string, PanelAddonManifest>([
-	[mcpAddonManifest.id, mcpAddonManifest],
-	[apexAddonManifest.id, apexAddonManifest]
+	['mcp', { id:'mcp', name:'OrbitFS MCP', description:'Engine-hosted MCP component.', version:'', kind:'engine' }],
+	['apex', { id:'apex', name:'OrbitFS APEX', description:'Engine-hosted APEX component.', version:'', kind:'engine' }],
+	['studio', { id:'studio', name:'OrbitFS Studio', description:'Engine-hosted Studio component.', version:'', kind:'engine' }]
 ]);
 
 export function getPanelAddonManifest(id: string) {
@@ -21,17 +19,15 @@ export function getPanelAddonManifest(id: string) {
 export async function dispatchPanelAddonHttp(id: string, _request: Request): Promise<Response> {
 	if (id === 'mcp') {
 		return new Response(JSON.stringify({
-			error: 'MCP resource server is hosted by OrbitFS Engine Host',
-			resource: 'https://orbitfsengine.vercel.app/mcp'
+			error: 'MCP resource server is hosted by the installation Shared Engine Host'
 		}), {
 			status: 410,
 			headers: { 'content-type': 'application/json' }
 		});
 	}
-	if (id === 'apex') {
+	if (id === 'apex' || id === 'studio') {
 		return new Response(JSON.stringify({
-			error: 'APEX processing runtime is hosted by OrbitFS Engine Host',
-			manage: 'https://orbitfsengine.vercel.app/engines/apex'
+			error: id.toUpperCase() + ' runtime is hosted by the installation Shared Engine Host'
 		}), {
 			status: 410,
 			headers: { 'content-type': 'application/json' }

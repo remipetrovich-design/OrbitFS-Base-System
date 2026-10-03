@@ -2,6 +2,7 @@ import { redirect, type Handle } from '@sveltejs/kit';
 import { getPanelLicenseSummary, ensureInstallationIdentity, recordLicenseManagerCheckIn } from '$lib/server/license';
 import { getSessionUser } from '$lib/server/auth';
 import { syncBaseRuntimeReleaseIdentity } from '$lib/server/base-release-state';
+import { getBaseSetupState } from '$lib/server/setup';
 
 const CHECK_IN_INTERVAL_MS=60_000;
 const checkInCache=new Map<string,number>();
@@ -9,6 +10,7 @@ const checkInCache=new Map<string,number>();
 const PUBLIC_PATHS = new Set([
 	'/license-suspended',
 	'/login',
+	'/setup',
 	'/api/auth/login',
 	'/api/license/status',
 	'/api/license/activate',
@@ -16,6 +18,10 @@ const PUBLIC_PATHS = new Set([
 	'/api/license/provider/test',
 	'/api/license/updater',
 	'/api/license/diagnostics',
+	'/api/setup/status',
+	'/api/setup/config',
+	'/api/setup/bootstrap',
+	'/api/setup/register-installation',
 	'/api/auth/me',
 	'/api/auth/logout'
 ]);
@@ -98,6 +104,16 @@ export const handle: Handle = async ({ event, resolve }) => {
 	}
 
 	if (pathname === '/license') return resolve(event);
+
+	// A brand-new Base is intentionally deployed before licence activation.
+	// Until the first Owner exists, send browser traffic to the first-time
+	// installer where the customer enters the licence key themselves.
+	try {
+		const setup = await getBaseSetupState();
+		if (!setup.ownerExists) throw redirect(303, '/setup');
+	} catch (setupError) {
+		if (setupError && typeof setupError === 'object' && 'status' in setupError) throw setupError;
+	}
 
 	const next = encodeURIComponent(`${pathname}${event.url.search}`);
 	throw redirect(303, `/license?next=${next}`);

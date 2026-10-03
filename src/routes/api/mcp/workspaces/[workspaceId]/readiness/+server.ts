@@ -4,6 +4,7 @@ import { assertMcpLicensed } from '$lib/server/mcp-cloud';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 import { knowledgeArchitectureHealth } from '$lib/server/knowledge-architecture';
 import { getWorkspace, isSystemAdmin, managementPermissions, requireWorkspaceAccess } from '$lib/server/workspaces';
+import { getSharedEngineHostState } from '$lib/server/engine-host-state';
 
 export async function GET({ cookies, params }: any) {
 	try {
@@ -32,6 +33,8 @@ export async function GET({ cookies, params }: any) {
 		}
 
 		const admin = isSystemAdmin(user);
+		const engineHost=await getSharedEngineHostState().catch(()=>null);
+		const engineBase=String(engineHost?.hostUrl||'').replace(/\/$/,'');
 		const hasMembership = Boolean(membership.data);
 		const memberEnabled = hasMembership
 			? membership.data?.mcp_enabled === true
@@ -81,8 +84,8 @@ export async function GET({ cookies, params }: any) {
 			legacy: { filesystem: false, pathReferences: legacyPaths },
 			blockers,
 			recommendations,
-			engineHost: 'https://orbitfsengine.vercel.app',
-			resource: 'https://orbitfsengine.vercel.app/mcp'
+			engineHost: engineBase||null,
+			resource: engineBase?engineBase+'/mcp':null
 		});
 	} catch (error: any) {
 		return json({ error: String(error?.message || 'Could not calculate MCP workspace readiness') }, { status: Number(error?.status || 500) });

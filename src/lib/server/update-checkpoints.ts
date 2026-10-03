@@ -260,11 +260,20 @@ export async function findEngineRollbackCheckpoint(currentReleaseId?: string | n
 		if(!releaseId||!version||releaseId===currentId)continue;
 		const engineHost=objectValue(checkpoint.engineHost);
 		const channel=String(engineHost?.releaseChannel||'').trim().toLowerCase()||null;
+		const distribution=String(engineHost?.distribution||'').trim()||null;
+		const branchPrefix='github:lucaskerim123/V1-vercel-engine@';
+		const recordedSource=String(engine?.sourceCommit||'').trim().toLowerCase();
+		const releaseSource=releaseId.startsWith(branchPrefix)?releaseId.slice(branchPrefix.length).toLowerCase():'';
+		const sourceCommit=/^[a-f0-9]{40}$/.test(recordedSource)?recordedSource:/^[a-f0-9]{40}$/.test(releaseSource)?releaseSource:null;
+		const components=Array.isArray(engine?.components)?[...new Set(engine.components.map((item:any)=>String(item||'').trim().toLowerCase()).filter(Boolean))]:[];
 		return {
 			checkpoint,
 			releaseId,
 			version,
 			channel,
+			distribution,
+			sourceCommit,
+			components,
 			componentVersions:engine?.componentVersions&&typeof engine.componentVersions==='object'?engine.componentVersions:{}
 		};
 	}

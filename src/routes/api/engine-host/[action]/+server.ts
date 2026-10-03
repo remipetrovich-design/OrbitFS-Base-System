@@ -6,10 +6,11 @@ import { isSystemAdmin } from '$lib/server/workspaces';
 import { writeAudit } from '$lib/server/audit';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 import { getSharedEngineHostState, saveSharedEngineHostState } from '$lib/server/engine-host-state';
-import { ENGINE_DEPLOYER_PROTOCOL, fetchEngineBootstrapRelease, assertInitialEngineRelease, inspectInstalledEngineDatabase, engineHostProvisioningStatus, provisionSharedEngineHost, refreshSharedEngineDeployment, registerSharedEngineUpdater, deleteRegisteredSharedEngineProject } from '$lib/server/vercel-engine-provision';
+import { ENGINE_DEPLOYER_PROTOCOL, fetchEngineBootstrapRelease, assertInitialEngineRelease, inspectInstalledEngineDatabase, engineHostProvisioningStatus, provisionSharedEngineHost, refreshSharedEngineDeployment, registerSharedEngineUpdater, deleteRegisteredSharedEngineProject, scopeEngineReleaseForInstalledLicenses } from '$lib/server/vercel-engine-provision';
 import { confirmSharedEngineHostLink, confirmSharedEngineHostUnlink, readSharedEngineHostLink } from '$lib/server/engine-host-remote';
 import { getVercelConnectionSummary } from '$lib/server/vercel-connection';
 import { fetchAuthorizedEngineBranch } from '$lib/server/engine-branch-client';
+import { fetchLatestEngineRelease } from '$lib/server/engine-release-client';
 import { buildEngineUpdatePlan } from '$lib/server/engine-update-planner';
 import { resolveInstalledBaseVersion } from '$lib/server/base-release-state';
 import { clearEngineActiveRelease } from '$lib/server/update-checkpoints';
@@ -45,7 +46,8 @@ async function assertNoAttachedEngines() {
 
 async function autoAttachInstalledEngineAddons(user:any) {
 	const db=getSupabaseAdmin();
-	const result=await db.from('orbitfs_addons').select('id,name,installed,attached,available,license_component,status,runtime').eq('installed',true);
+	const engineIds=Object.keys(CLOUD_ADDON_MANIFESTS).filter((id)=>CLOUD_ADDON_MANIFESTS[id]?.runtimeMode==='engine-host');
+	const result=await db.from('orbitfs_addons').select('id,name,installed,attached,available,license_component,status,runtime').in('id',engineIds);
 	if(result.error)throw result.error;
 	const attached:any[]=[];
 	for(const row of result.data||[]){
@@ -53,38 +55,57 @@ async function autoAttachInstalledEngineAddons(user:any) {
 		const manifest=CLOUD_ADDON_MANIFESTS[id];
 		if(!manifest||manifest.runtimeMode!=='engine-host'||(row as any).available===false)continue;
 		const runtime=(row as any).runtime&&typeof (row as any).runtime==='object'?(row as any).runtime:{};
+		const pendingInstall=runtime.pendingInstall===true;
+
 		if((row as any).attached===true){
-			if(runtime.autoAttachPending===true){
-				await saveCloudAddon(id,{runtime:{...runtime,autoAttachPending:false,lastAutoAttachAt:new Date().toISOString()}});
+			if(runtime.autoAttachPending===true||pendingInstall){
+				await saveCloudAddon(id,{runtime:{...runtime,pendingInstall:false,desiredInstalled:true,autoAttachPending:false,lastAutoAttachAt:new Date().toISOString()}});
 			}
 			continue;
 		}
-		const shouldAttach=runtime.autoAttachPending===true||!runtime.lastManualDetachAt;
+
+		// Existing installed components may be auto-attached after a Host rebuild.
+		// New components remain installed=false until Engine confirms this signed
+		// pairing; pairEngineHost atomically flips installed+attached on success.
+		const shouldAttach=pendingInstall||((row as any).installed===true&&(runtime.autoAttachPending===true||!runtime.lastManualDetachAt));
 		if(!shouldAttach)continue;
+
 		const component=String((row as any).license_component||manifest.licenseComponent||'').trim();
 		try{
-			await assertAddonLicensed(component||null,true);
+			await assertAddonLicensed(component||null,false);
 		}catch(error:any){
 			const code=String(error?.code||'').trim().toUpperCase();
 			const componentOnly=['LICENSE_REQUIRED','LICENSE_COMPONENT_NOT_ENTITLED','COMPONENT_NOT_ENTITLED','ENTITLEMENT_REQUIRED','COMPONENT_NOT_LICENSED'].includes(code);
 			if(!componentOnly)throw error;
 			const current=await getCloudAddon(id);
 			const currentRuntime=current.runtime&&typeof current.runtime==='object'?current.runtime:{};
-			await saveCloudAddon(id,{attached:false,configured:false,status:'license_required',runtime:{...currentRuntime,online:false,lastLicenseReason:code,lastLicenseCheckedAt:new Date().toISOString()}});
+			await saveCloudAddon(id,{
+				attached:false,
+				configured:false,
+				status:'license_required',
+				runtime:{...currentRuntime,pendingInstall:false,online:false,installState:'license_required',lastLicenseReason:code,lastLicenseCheckedAt:new Date().toISOString()}
+			});
 			attached.push({id,component,skipped:true,reason:code});
 			continue;
 		}
+
 		const attach=await getEngineAttachContext(id,String(user.id));
 		const remote=await confirmEngineHostPairing({engineId:id,installationId:attach.installationId,panelUrl:attach.panelUrl,workspaceId:attach.workspaceId,actorUserId:String(user.id)});
 		const current=await getCloudAddon(id);
 		const currentRuntime=current.runtime&&typeof current.runtime==='object'?current.runtime:{};
-		await saveCloudAddon(id,{runtime:{...currentRuntime,autoAttachPending:false,lastAutoAttachAt:new Date().toISOString(),lastManualDetachAt:null}});
+		await saveCloudAddon(id,{
+			installed:true,
+			attached:true,
+			status:'attached',
+			installed_at:(current as any).installed_at||new Date().toISOString(),
+			runtime:{...currentRuntime,pendingInstall:false,desiredInstalled:true,installState:'installed',autoAttachPending:false,lastAutoAttachAt:new Date().toISOString(),lastManualDetachAt:null}
+		});
 		let knowledgeSync:any=null;
 		if(id==='mcp'||id==='apex'){
 			knowledgeSync=await syncApexKnowledgeToMcp(attach.workspaceId).catch((error:any)=>({available:true,synced:0,failed:1,error:String(error?.message||error||'Knowledge reconciliation failed')}));
 		}
-		await writeAudit({actorUserId:user.id,action:'engine.auto_attach',targetType:'addon',targetId:id,detail:{engineHost:true,workspaceId:attach.workspaceId,licenseComponent:component,remoteConfirmed:true}});
-		attached.push({id,component,workspaceId:attach.workspaceId,remote,knowledgeSync});
+		await writeAudit({actorUserId:user.id,action:pendingInstall?'addon.install.complete':'engine.auto_attach',targetType:'addon',targetId:id,detail:{engineHost:true,workspaceId:attach.workspaceId,licenseComponent:component,remoteConfirmed:true,pendingInstall}});
+		attached.push({id,component,workspaceId:attach.workspaceId,remote,knowledgeSync,pendingInstall});
 	}
 	return attached;
 }
@@ -165,18 +186,23 @@ export async function POST({params,request,cookies}:any) {
 			if(!current.releaseId&&!current.deploymentId&&!current.pendingDeploymentId){
 				const bootstrap=await fetchEngineBootstrapRelease();
 				assertInitialEngineRelease(bootstrap);
-				let plan=await buildEngineUpdatePlan({descriptor:bootstrap.descriptor,package:bootstrap.package,installedBaseVersion,supportedProtocol:ENGINE_DEPLOYER_PROTOCOL});
-				if(bootstrap.descriptor.requiresPanelUpdate&&String(env.ORBITFS_UPDATE_RELEASE_ID||'').trim()!==bootstrap.descriptor.releaseId){
+				const scoped=(await scopeEngineReleaseForInstalledLicenses(bootstrap,body.components)).release;
+				let plan=await buildEngineUpdatePlan({descriptor:scoped.descriptor,package:scoped.package,installedBaseVersion,supportedProtocol:ENGINE_DEPLOYER_PROTOCOL});
+				if(scoped.descriptor.requiresPanelUpdate&&String(env.ORBITFS_UPDATE_RELEASE_ID||'').trim()!==scoped.descriptor.releaseId){
 					plan={...plan,status:'blocked',blocked:true,reason:'This release also changes Base. Apply the combined approved update before deploying Engine.'};
 				}
-				return json({ok:true,plan,release:{version:bootstrap.descriptor.version,id:bootstrap.descriptor.releaseId,channel:bootstrap.descriptor.channel,checksum:bootstrap.descriptor.sha256,source:'license-manager'}});
+				return json({ok:true,plan,release:{version:scoped.descriptor.version,id:scoped.descriptor.releaseId,channel:scoped.descriptor.channel,checksum:scoped.descriptor.sha256,components:scoped.descriptor.components,source:'license-manager'}});
 			}
-			const release=await fetchAuthorizedEngineBranch();
+			const releaseSource=current.distribution==='orbitfs-store-package-v1'?'published-update':'authorized-branch';
+			const authorized=releaseSource==='published-update'
+				?await fetchLatestEngineRelease({channel:current.releaseChannel||'stable'})
+				:await fetchAuthorizedEngineBranch();
+			const release=(await scopeEngineReleaseForInstalledLicenses(authorized,body.components)).release;
 			let plan=await buildEngineUpdatePlan({descriptor:release.descriptor,package:release.package,installedBaseVersion,supportedProtocol:ENGINE_DEPLOYER_PROTOCOL});
 			if(release.descriptor.requiresPanelUpdate&&String(env.ORBITFS_UPDATE_RELEASE_ID||'').trim()!==release.descriptor.releaseId){
 				plan={...plan,status:'blocked',blocked:true,reason:`Update ${release.descriptor.version} also changes OrbitFS Base. Apply the full Update release through the customer update system before updating the Shared Engine.`};
 			}
-			return json({ok:true,plan,release:{version:release.descriptor.version,id:release.descriptor.releaseId,channel:release.descriptor.channel,checksum:release.descriptor.sha256}});
+			return json({ok:true,plan,release:{version:release.descriptor.version,id:release.descriptor.releaseId,channel:release.descriptor.channel,checksum:release.descriptor.sha256,components:release.descriptor.components,source:releaseSource}});
 		}
 
 		if(action==='provision') {
