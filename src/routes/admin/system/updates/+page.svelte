@@ -86,8 +86,8 @@
 				<CardContent><Badge variant={baseRelease?.updateAvailable ? 'outline' : 'success'}>{baseRelease?.publishedVersion || 'Unavailable'}</Badge><p class="mt-2 text-xs text-muted-foreground">{baseRelease?.updateAvailable ? 'New Base release available' : 'Installed Base matches published release'}</p></CardContent></Card>
 			<Card><CardHeader><CardTitle class="flex items-center gap-2"><GitBranch class="size-4" />Registered project</CardTitle><CardDescription>Base updates redeploy this exact Vercel project</CardDescription></CardHeader>
 				<CardContent><Badge variant={status.baseUpdate.ready ? 'success' : 'outline'}>{status.baseUpdate.ready ? 'Ready' : 'Blocked'}</Badge><p class="mt-2 font-mono text-xs text-muted-foreground break-all">{status.projectId || 'Project ID not registered'}</p></CardContent></Card>
-			<Card><CardHeader><CardTitle class="flex items-center gap-2"><ShieldCheck class="size-4" />Base update path</CardTitle><CardDescription>Single-owner redeploy contract</CardDescription></CardHeader>
-				<CardContent><Badge variant="outline">Base Deployer</Badge><p class="mt-2 text-xs text-muted-foreground">Updates must redeploy the registered project; the normal Engine updater cannot carry Base files.</p></CardContent></Card>
+			<Card><CardHeader><CardTitle class="flex items-center gap-2"><ShieldCheck class="size-4" />Base update path</CardTitle><CardDescription>Base + inner deployer ownership</CardDescription></CardHeader>
+				<CardContent><Badge variant="outline">Base Deployer / Updater</Badge><p class="mt-2 text-xs text-muted-foreground">Base releases update the Base system and the Base-owned inner deployer. MCP/APEX/Studio updates never carry Base files.</p></CardContent></Card>
 		</div>
 
 		<Card>
@@ -143,7 +143,7 @@
 			<CardHeader><CardTitle>Release branches</CardTitle><CardDescription>Simple two-channel release model.</CardDescription></CardHeader>
 			<CardContent class="space-y-3 text-sm text-muted-foreground">
 				<div><b class="text-foreground">base-release</b> — controlled source for initial Base installs and later major Base updates. Published Base releases are delivered on <b class="text-foreground">{status.releaseChannel}</b> and must redeploy the registered Base Vercel project.</div>
-				<div><b class="text-foreground">UPDATE_RELEASE</b> — Engine/add-on updates only. It may target APEX, MCP and Studio, but never Base.</div>
+				<div><b class="text-foreground">UPDATE_RELEASE</b> — Engine/add-on updates only. It may target APEX, MCP and Studio, but never Base. The updater calls the Base-owned inner deployer to create or update the Shared Engine Host, including when no Engine is installed yet.</div>
 			</CardContent>
 		</Card>
 	{/if}
