@@ -73,7 +73,7 @@
 
 	onMount(() => {
 		loadHealth();
-		const timer = setInterval(loadHealth, 10_000);
+		const timer = setInterval(loadHealth, 60_000);
 		return () => clearInterval(timer);
 	});
 
@@ -215,7 +215,7 @@
 						</div>
 					{/each}
 				</div>
-				<p class="mt-3 text-[10px] text-muted-foreground lg:hidden">Live status refreshes every 10 seconds. Last check: {lastChecked}</p>
+				<p class="mt-3 text-[10px] text-muted-foreground lg:hidden">Live status refreshes every 1 minute. Last check: {lastChecked}</p>
 			</div>
 
 			<Card class="border-border/80 bg-card/90 shadow-xl shadow-black/25 backdrop-blur">
