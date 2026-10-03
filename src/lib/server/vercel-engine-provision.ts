@@ -630,7 +630,7 @@ export async function inspectInstalledEngineDatabase() {
     releaseId:latest.descriptor.releaseId,version:latest.descriptor.version,sourceCommit:latest.descriptor.sourceCommit,
     installedReleaseId:current.releaseId,releaseMatches,migrationCount:state.migrations.length,
     missing:state.missing.map(({id,file,component,sha256})=>({id,file,component,sha256})),
-    repairSupported:releaseMatches && ['orbitfs-store-package-v1','orbitfs-authorized-branch-v1'].includes(String(current.distribution)) && !latest.descriptor.requiresPanelUpdate
+    repairSupported:releaseMatches && ['orbitfs-store-package-v1','orbitfs-authorized-branch-v1'].includes(String(current.distribution))
   };
 }
 
@@ -1057,14 +1057,6 @@ export async function registerSharedEngineUpdater(input: Record<string, any> = {
 		return {host,synced:false,conflict:false,updateStarted:false,authorityUnavailable:true,fallback:'keep-current-release',latest:null,errorCode:String(error?.code||'ENGINE_SOURCE_UNAVAILABLE')};
 	}
 
-	if(latest.descriptor.requiresPanelUpdate && String(env.ORBITFS_UPDATE_RELEASE_ID||'').trim()!==latest.descriptor.releaseId) {
-		const host=await saveSharedEngineHostState({
-			updaterConnected:false,
-			updaterLastVerifiedAt:new Date().toISOString(),
-			updaterLastError:`Latest Engine release ${latest.descriptor.version} is part of a mixed Base + Engine update and requires the full customer Update first.`
-		},current);
-		return {host,synced:false,conflict:true,requiresPanelUpdate:true,latest:latest.descriptor};
-	}
 
 	const currentReleaseId=String(current.releaseId||'').trim();
 	const currentVersion=String(current.releaseVersion||'').trim();
@@ -1306,7 +1298,7 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 	const installation = await getInstallationRoute();
 	const panelUrl = configuredPanelUrl();
 	const name = current.projectName || projectName(current.installationId);
-	// Both initial installs and updates use only authority-delivered artifacts.
+	// Base owns this inner deployer. Both first Engine installs and later Engine/add-on updates call this same authority-verified path.
 	const releaseChannel=String(input.releaseChannel||input.channel||current.releaseChannel||env.ORBITFS_UPDATE_CHANNEL||'stable').trim().toLowerCase()||'stable';
 	const requestedReleaseId=String(input.releaseId||'').trim();
 	const requestedSourceCommit=String(input.sourceCommit||'').trim().toLowerCase();
@@ -1314,7 +1306,7 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 	if(requestedSourceMode&&!['authorized-branch','published-update'].includes(requestedSourceMode)){
 		throw fail('Unsupported Engine release source.',400,'ENGINE_RELEASE_SOURCE_INVALID');
 	}
-	const branchRelease=requestedReleaseId.startsWith('github:lucaskerim123/V1-vercel-engine@');
+	const branchRelease=requestedReleaseId.startsWith('github:remipetrovich-design/OrbitFS_Engine@');
 	const releaseSource=requestedSourceMode||(branchRelease?'authorized-branch':requestedReleaseId?'published-update':current.distribution==='orbitfs-store-package-v1'?'published-update':'authorized-branch');
 	if(releaseSource==='authorized-branch'&&input.rollbackToCheckpoint===true&&!/^[a-f0-9]{40}$/.test(requestedSourceCommit)){
 		throw fail('Engine branch rollback requires the previously authorized source commit recorded in its checkpoint.',409,'ENGINE_ROLLBACK_SOURCE_MISSING');
@@ -1345,13 +1337,6 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 	if (!current.releaseId) assertInitialEngineRelease(release);
 	const databaseContract=await resolveEngineDatabaseContract(release,descriptor);
 	const migrationState=await inspectEngineDatabaseMigrations(databaseContract.packageData,descriptor);
-	if (descriptor.requiresPanelUpdate && String(env.ORBITFS_UPDATE_RELEASE_ID || '').trim() !== descriptor.releaseId && input.rollbackToCheckpoint!==true) {
-		throw fail(
-			`Engine release ${descriptor.version} is part of a mixed Base + Engine update. Apply the full Update release through the customer update system before updating the Shared Engine.`,
-			409,
-			'ENGINE_UPDATE_PANEL_REQUIRED'
-		);
-	}
 	let updatePlan = await buildEngineUpdatePlan({
 		descriptor,
 		package: release.package,
