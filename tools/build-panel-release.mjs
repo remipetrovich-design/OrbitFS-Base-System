@@ -306,6 +306,7 @@ const payload = {
 		excludedUpdateTargets: ['mcp','apex','studio']
 	},
 	checkpointRequired: false,
+	engineDeployerProtocol: 1,
 	minimumEngineDeployerProtocol: 1,
 	releaseId: `base-${version}`,
 	sourceCommit,
@@ -340,6 +341,7 @@ const payload = {
 		databaseLatestMigration,
 		databaseMigrationChain,
 		databaseComponentBoundary,
+		engineDeployerProtocol: 1,
 		databaseCompatibility,
 		rollbackPolicy,
 		releaseLifecycle
