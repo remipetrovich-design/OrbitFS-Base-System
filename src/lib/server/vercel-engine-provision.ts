@@ -634,9 +634,35 @@ export async function inspectInstalledEngineDatabase() {
   };
 }
 
-async function resolveEngineDatabaseContract(_release:any,descriptor:any){
+async function resolveEngineDatabaseContract(release:any,descriptor:any){
 	const components:string[]=[...new Set<string>((descriptor?.components||[]).map((item:any)=>String(item||'').trim().toLowerCase()).filter((item:string)=>ENGINE_COMPONENT_IDS.includes(item as any)))];
 	if(!components.length)throw fail('At least one Engine component is required before resolving its database package.',400,'ENGINE_DATABASE_COMPONENT_REQUIRED');
+
+	// The authorized Engine payload is source-locked and checksum-verified by
+	// License Manager. Engine packaging builds this cumulative contract directly
+	// from supabase/migrations/{shared,mcp,apex,studio}; use that exact contract
+	// for first install/update instead of requiring a second published DB row.
+	const packagedDatabase=release?.package?.database;
+	if(packagedDatabase&&typeof packagedDatabase==='object'&&!Array.isArray(packagedDatabase)){
+		const migrations=Array.isArray(packagedDatabase.migrations)?packagedDatabase.migrations:[];
+		if(
+			packagedDatabase.format!=='orbitfs-db-migrations-v1'||
+			packagedDatabase.mode!=='shared-panel'||
+			packagedDatabase.provider!=='supabase'||
+			Number(packagedDatabase.migrationCount)!==migrations.length
+		){
+			throw fail('Authorized Engine package contains an invalid database migration contract.',502,'ENGINE_DATABASE_MIGRATION_CONTRACT_INVALID');
+		}
+		preparedEngineMigrations({database:packagedDatabase},descriptor);
+		return{
+			packageData:{database:packagedDatabase},
+			source:'authorized-engine-package',
+			packages:[]
+		};
+	}
+
+	// Backward compatibility for an older Engine payload without an embedded
+	// cumulative migration contract.
 	let registry:any;
 	try{
 		registry=await fetchEngineDatabasePackageSet(components);
@@ -644,7 +670,7 @@ async function resolveEngineDatabaseContract(_release:any,descriptor:any){
 		const code=String(error?.code||'').trim().toUpperCase();
 		if(code==='DATABASE_PACKAGE_NOT_FOUND'||code==='DATABASE_PACKAGE_FETCH_FAILED'||Number(error?.status||0)===404){
 			throw fail(
-				'No current central database package is published for the requested Engine component set.',
+				'Authorized Engine package has no database contract and no compatible central database package is published.',
 				409,
 				'ENGINE_DATABASE_PACKAGE_REQUIRED'
 			);
