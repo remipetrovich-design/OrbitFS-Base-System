@@ -37,7 +37,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Check active GitHub profile
+        id: profile
+        shell: bash
+        env:
+          EXPECTED_GITHUB_PROFILE: fallback
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error --retry 2 --retry-delay 2 https://dev.incendiarynetworks.cc/api/github-profile)"
+          active="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.profile||""))' "$response")"
+          echo "Active GitHub profile: $active"
+          echo "Expected for this repository: $EXPECTED_GITHUB_PROFILE"
+          if [ "$active" != "$EXPECTED_GITHUB_PROFILE" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Inactive GitHub profile. Remaining workflow steps are disabled."
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
       - name: Require base-release source
+        if: steps.profile.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -47,12 +66,14 @@ jobs:
           fi
 
       - name: Checkout exact Base source
+        if: steps.profile.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
 
       - name: Verify Base source identity
+        if: steps.profile.outputs.run == 'true'
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         shell: bash
@@ -63,6 +84,7 @@ jobs:
           test "$(git rev-parse origin/base-release)" = "$SOURCE_SHA" || { echo "::error::base-release moved after selection. Inspect the new tip and run the release again."; exit 1; }
 
       - name: Require release database tree to match current main
+        if: steps.profile.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -77,21 +99,26 @@ jobs:
           echo "Stage 1 Base database migrations match main at the inspected release commit."
 
       - name: Set up Node
+        if: steps.profile.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
 
       - name: Install locked dependencies
+        if: steps.profile.outputs.run == 'true'
         run: npm ci
 
       - name: Typecheck
+        if: steps.profile.outputs.run == 'true'
         run: npm run check
 
       - name: Production build
+        if: steps.profile.outputs.run == 'true'
         run: npm run build
 
       - name: Build authoritative customer database snapshot
+        if: steps.profile.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -103,6 +130,7 @@ jobs:
           test -s orbitfs-database-schema.json
 
       - name: Build Base deployment artifact
+        if: steps.profile.outputs.run == 'true'
         id: package
         env:
           VERSION: ${{ inputs.version }}
@@ -122,6 +150,7 @@ jobs:
           echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
 
       - name: Validate Base deployment artifact
+        if: steps.profile.outputs.run == 'true'
         env:
           VERSION: ${{ inputs.version }}
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -216,6 +245,7 @@ jobs:
           NODE
 
       - name: Generate Base changelog
+        if: steps.profile.outputs.run == 'true'
         env:
           VERSION: ${{ inputs.version }}
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -244,6 +274,7 @@ jobs:
           } > release-notes.md
 
       - name: Normalize License Manager URL
+        if: steps.profile.outputs.run == 'true'
         id: license-master
         env:
           RAW_LICENSE_MASTER_URL: ${{ vars.LICENSE_MASTER_URL || 'https://incendiarynetworks.cc/api/v1' }}
@@ -264,6 +295,7 @@ jobs:
           echo "url=$normalized" >> "$GITHUB_OUTPUT"
 
       - name: Register Base database package candidate
+        if: steps.profile.outputs.run == 'true'
         id: database-package
         env:
           LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
@@ -291,6 +323,7 @@ jobs:
           echo "reference=$reference" >> "$GITHUB_OUTPUT"
 
       - name: Validate Base release channel
+        if: steps.profile.outputs.run == 'true'
         env:
           LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
           LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
@@ -303,6 +336,7 @@ jobs:
           CHANNEL="$CHANNEL" CHANNELS="$channels" node -e 'const c=process.env.CHANNEL,j=JSON.parse(process.env.CHANNELS),ok=(j.channels||[]).some(x=>x.channel===c&&x.enabled===true);if(!ok)throw new Error("Base release channel is not configured or is disabled: "+c);'
 
       - name: Publish Base artifact to GitHub Release
+        if: steps.profile.outputs.run == 'true'
         id: github-release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -328,6 +362,7 @@ jobs:
           echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
 
       - name: Create Base release in License Manager
+        if: steps.profile.outputs.run == 'true'
         id: master-release
         env:
           LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
@@ -405,6 +440,7 @@ jobs:
           echo "Base candidate created in License Manager: $release_id"
 
       - name: Candidate handoff complete
+        if: steps.profile.outputs.run == 'true'
         run: echo "Base candidate is in License Manager. Technical validation runs next; approval/publication remain manual."
 
   technical-validation:
@@ -414,6 +450,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Validate Base candidate
+        if: steps.profile.outputs.run == 'true'
         env:
           LICENSE_MASTER_URL: ${{ needs.candidate.outputs.license_master_url }}
           LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
@@ -433,4 +470,5 @@ jobs:
           echo "License Manager Base validation passed."
 
       - name: Manual approval handoff
+        if: steps.profile.outputs.run == 'true'
         run: echo "Technical validation passed. Approve and publish this Base candidate manually in License Manager before deploying it to customers."
