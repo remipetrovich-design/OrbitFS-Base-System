@@ -74,7 +74,8 @@ export function parsePackage(archive: Buffer, descriptor: EngineReleaseDescripto
 		const bundleComponents = normalizedComponents(rawBundleComponents);
 		if (bundleComponents.slice().sort().join(',') !== descriptor.components.slice().sort().join(',')) throw fail('Update bundle Engine components do not match its License Master descriptor.', 502, 'ENGINE_RELEASE_COMPONENTS_MISMATCH');
 		if(payload.payloads?.panel||payload.baseBaseline) throw fail('Published Update contains a Base/Panel payload. The OrbitFS Updater is Engine/addon-only.',409,'ENGINE_RELEASE_SCOPE_INVALID');
-		if(payload.updateScope&&payload.updateScope!=='engine-components-only-v1') throw fail('Published Update declares an unsupported update scope.',409,'ENGINE_RELEASE_SCOPE_INVALID');
+		if(payload.updateScope!=='engine-components-only-v1') throw fail('Published Update must declare Engine-component-only scope.',409,'ENGINE_RELEASE_SCOPE_INVALID');
+		if(payload.executor!=='orbitfs-base-inner-deployer-v1') throw fail('Published Update must execute through the Base-owned inner deployer.',409,'ENGINE_RELEASE_EXECUTOR_INVALID');
 		if (!payload.payloads?.engine) throw fail('Published update does not contain a Shared Engine payload.', 409, 'ENGINE_RELEASE_PAYLOAD_MISSING');
 		return validateEnginePackage(payload.payloads.engine, descriptor);
 	}
