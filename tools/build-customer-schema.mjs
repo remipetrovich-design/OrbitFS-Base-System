@@ -166,6 +166,12 @@ const componentBoundary = {
   excludedComponents: ['engine-shared', 'mcp', 'apex', 'studio'],
   excludedTablePrefixes: ['mcp_', 'apex_', 'studio_'],
   excludedRoutinePrefixes: ['mcp_', 'apex_', 'studio_', 'orbitfs_mcp_', 'orbitfs_apex_', 'orbitfs_studio_'],
+  preservedBaseRoutines: [
+    'orbitfs_mcp_context_item_key',
+    'orbitfs_mcp_context_get',
+    'orbitfs_mcp_context_patch',
+    'orbitfs_mcp_context_clear'
+  ],
   legacyMigrationHistoryRetained: true
 };
 
@@ -175,7 +181,7 @@ const componentBoundaryCleanup = [
   '-- Historical migrations above remain immutable lineage. This cleanup is part of',
   '-- the composed fresh-install Base snapshot only and is never a forward migration.',
   '-- Engine/add-on schema is installed later from the central database registry.',
-  "do language plpgsql 'declare item record; begin for item in select schemaname, viewname as object_name from pg_views where schemaname=''public'' and (left(viewname,4)=''mcp_'' or left(viewname,5)=''apex_'' or left(viewname,7)=''studio_'') loop execute format(''drop view if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select schemaname, matviewname as object_name from pg_matviews where schemaname=''public'' and (left(matviewname,4)=''mcp_'' or left(matviewname,5)=''apex_'' or left(matviewname,7)=''studio_'') loop execute format(''drop materialized view if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select schemaname, tablename as object_name from pg_tables where schemaname=''public'' and (left(tablename,4)=''mcp_'' or left(tablename,5)=''apex_'' or left(tablename,7)=''studio_'') loop execute format(''drop table if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select n.nspname as schema_name,p.proname,pg_get_function_identity_arguments(p.oid) as args,p.prokind from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname=''public'' and (left(p.proname,4)=''mcp_'' or left(p.proname,5)=''apex_'' or left(p.proname,7)=''studio_'' or left(p.proname,12)=''orbitfs_mcp_'' or left(p.proname,13)=''orbitfs_apex_'' or left(p.proname,15)=''orbitfs_studio_'') loop if item.prokind=''p'' then execute format(''drop procedure if exists %I.%I(%s) cascade'',item.schema_name,item.proname,item.args); else execute format(''drop function if exists %I.%I(%s) cascade'',item.schema_name,item.proname,item.args); end if; end loop; end';",
+  "do language plpgsql 'declare item record; begin for item in select schemaname, viewname as object_name from pg_views where schemaname=''public'' and (left(viewname,4)=''mcp_'' or left(viewname,5)=''apex_'' or left(viewname,7)=''studio_'') loop execute format(''drop view if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select schemaname, matviewname as object_name from pg_matviews where schemaname=''public'' and (left(matviewname,4)=''mcp_'' or left(matviewname,5)=''apex_'' or left(matviewname,7)=''studio_'') loop execute format(''drop materialized view if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select schemaname, tablename as object_name from pg_tables where schemaname=''public'' and (left(tablename,4)=''mcp_'' or left(tablename,5)=''apex_'' or left(tablename,7)=''studio_'') loop execute format(''drop table if exists %I.%I cascade'', item.schemaname, item.object_name); end loop; for item in select n.nspname as schema_name,p.proname,pg_get_function_identity_arguments(p.oid) as args,p.prokind from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname=''public'' and (left(p.proname,4)=''mcp_'' or left(p.proname,5)=''apex_'' or left(p.proname,7)=''studio_'' or left(p.proname,12)=''orbitfs_mcp_'' or left(p.proname,13)=''orbitfs_apex_'' or left(p.proname,15)=''orbitfs_studio_'') and p.proname not in (''orbitfs_mcp_context_item_key'',''orbitfs_mcp_context_get'',''orbitfs_mcp_context_patch'',''orbitfs_mcp_context_clear'') loop if item.prokind=''p'' then execute format(''drop procedure if exists %I.%I(%s) cascade'',item.schema_name,item.proname,item.args); else execute format(''drop function if exists %I.%I(%s) cascade'',item.schema_name,item.proname,item.args); end if; end loop; end';",
   ''
 ].join('\n');
 
