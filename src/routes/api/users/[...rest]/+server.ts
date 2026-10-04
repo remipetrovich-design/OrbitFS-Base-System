@@ -114,15 +114,15 @@ export async function POST({ params, request, cookies }) {
 		if (rest) return json({ error:'Not found' }, { status:404 });
 		const body = await request.json().catch(() => ({}));
 		const username = String(body.username ?? '').trim();
-		const pin = String(body.pin ?? '');
+		const password = String(body.password ?? '');
 		const email = String(body.email ?? '').trim().toLowerCase() || null;
 		const role = ['owner','admin','user'].includes(body.role) ? body.role : 'user';
 		const status = ['active','inactive','banned'].includes(body.status) ? body.status : 'active';
 		if (!/^[a-zA-Z0-9._-]{2,40}$/.test(username)) return json({ error:'Username must be 2-40 letters, numbers, dots, underscores or dashes' }, { status:400 });
-		if (pin && !/^\d{4,10}$/.test(pin)) return json({ error:'PIN must be 4-10 digits' }, { status:400 });
+		if (password && (password.length < 8 || password.length > 128 || !/[A-Za-z]/.test(password) || !/\d/.test(password))) return json({ error:'Password must be 8-128 characters and include a letter and number' }, { status:400 });
 		const { data:existing, error:lookupError } = await supabase.from('orbitfs_users').select('id,role,status').ilike('username', username).maybeSingle();
 		if (lookupError) throw lookupError;
-		if (!existing && !pin) return json({ error:'PIN must be 4-10 digits' }, { status:400 });
+		if (!existing && !password) return json({ error:'Password is required' }, { status:400 });
 		if (existing && ['owner','admin'].includes(existing.role) && (role === 'user' || status !== 'active')) {
 			const { count } = await supabase.from('orbitfs_users').select('*', { count:'exact', head:true }).in('role',['owner','admin']).eq('status','active');
 			if ((count ?? 0) <= 1) return json({ error:'At least one active system administrator is required' }, { status:400 });
@@ -134,7 +134,7 @@ export async function POST({ params, request, cookies }) {
 			ban_reason:status === 'banned' ? String(body.banReason ?? '').trim() || 'Banned by administrator' : null,
 			permissions:normalizeUserPermissions(body.permissions)
 		};
-		if (pin) { patch.password_hash = hashPassword(pin); patch.must_change_pin = pin === '0000'; }
+		if (password) { patch.password_hash = hashPassword(password); patch.must_change_pin = false; }
 		if (existing) {
 			const saved = await supabase.from('orbitfs_users').update(patch).eq('id', existing.id);
 			if (saved.error) throw saved.error;
@@ -145,8 +145,8 @@ export async function POST({ params, request, cookies }) {
 		const created = await supabase.from('orbitfs_users').insert({
 			username,
 			display_name:username,
-			password_hash:hashPassword(pin),
-			must_change_pin:pin === '0000',
+			password_hash:hashPassword(password),
+			must_change_pin:false,
 			...patch
 		}).select('id').single();
 		if (created.error || !created.data) throw created.error ?? new Error('Could not create user');
