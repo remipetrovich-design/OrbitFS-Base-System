@@ -12,23 +12,22 @@
 	type RegistrationStatus = { mode: 'off' | 'open' | 'approval_queue'; available: boolean; queueMode: boolean };
 
 	let username = $state('');
-	let pin = $state('');
+	let password = $state('');
 	let needsSetup = $state(false);
-	let showPin = $state(false);
+	let showPassword = $state(false);
 	let error = $state('');
 	let submitting = $state(false);
 	let forcedToken = $state('');
-	let newPin = $state('');
-	let confirmPin = $state('');
+	let newPassword = $state('');
+	let confirmPassword = $state('');
 	let lastChecked = $state('checking');
 	let health = $state<Record<HealthKey, boolean | null>>({ panel: null, api: null });
 	let mode = $state<'login' | 'register'>('login');
 	let registration = $state<RegistrationStatus>({ mode: 'off', available: false, queueMode: false });
 	let registerUsername = $state('');
 	let registerEmail = $state('');
-	let registerCredentialType = $state<'password' | 'pin'>('password');
-	let registerPin = $state('');
-	let registerConfirmPin = $state('');
+		let registerPassword = $state('');
+	let registerConfirmPassword = $state('');
 	let registerMessage = $state('');
 
 	const statusItems = $derived<HealthItem[]>([
@@ -84,14 +83,14 @@
 
 	async function submit(e: Event) {
 		e.preventDefault();
-		if (!username || !pin) return;
+		if (!username || !password) return;
 		error = '';
 		submitting = true;
 		try {
-			const result = await api.post<{ token: string; username: string; role: 'owner' | 'admin' | 'user'; mustChangePin: boolean }>('/login', { username, pin });
+			const result = await api.post<{ token: string; username: string; role: 'owner' | 'admin' | 'user'; mustChangePin: boolean }>('/login', { username, password });
 			if (result.mustChangePin) {
 				forcedToken = result.token;
-				pin = '';
+				password = '';
 				return;
 			}
 			auth.set(result.token, { username: result.username, role: result.role });
@@ -103,27 +102,27 @@
 		}
 	}
 
-	async function changeTemporaryPin(e: Event) {
+	async function changeTemporaryPassword(e: Event) {
 		e.preventDefault();
 		error = '';
-		if (!/^\d{4,10}$/.test(newPin) || newPin === '0000') {
-			error = 'Choose a new 4-10 digit PIN';
+		if (newPassword.length < 8 || newPassword.length > 128 || !/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword)) {
+			error = 'Password must be 8-128 characters and include a letter and number';
 			return;
 		}
-		if (newPin !== confirmPin) {
-			error = "PINs don't match";
+		if (newPassword !== confirmPassword) {
+			error = "Passwords don't match";
 			return;
 		}
 		submitting = true;
 		try {
 			const result = await api.post<{ token: string; username: string; role: 'owner' | 'admin' | 'user' }>(
-				'/login/change-pin',
-				{ token: forcedToken, pin: newPin }
+				'/login/change-password',
+				{ token: forcedToken, password: newPassword }
 			);
 			auth.set(result.token, { username: result.username, role: result.role });
 			await goto(postLoginPath());
 		} catch (err) {
-			error = err instanceof ApiError ? err.message : 'Could not change PIN';
+			error = err instanceof ApiError ? err.message : 'Could not change password';
 		} finally {
 			submitting = false;
 		}
@@ -135,24 +134,21 @@
 		registerMessage = '';
 		if (!registerUsername.trim()) return void (error = 'Username is required');
 		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registerEmail.trim())) return void (error = 'Enter a valid email address');
-		if (registerCredentialType === 'pin') {
-			if (!/^\d{8}$/.test(registerPin)) return void (error = 'PIN must be exactly 8 digits');
-			if (/^(\d)\1{7}$/.test(registerPin) || ['00000000', '12345678', '87654321'].includes(registerPin)) return void (error = 'Choose a less predictable 8-digit PIN');
-		} else {
+		if (registerPassword.length < 8 || registerPassword.length > 128 || !/[A-Za-z]/.test(registerPassword) || !/\d/.test(registerPassword)) return void (error = 'Password must be 8-128 characters and include a letter and a number'); else {
 			if (registerPin.length < 8 || registerPin.length > 128 || !/[A-Za-z]/.test(registerPin) || !/\d/.test(registerPin)) return void (error = 'Password must be 8-128 characters and include a letter and a number');
 		}
-		if (registerPin !== registerConfirmPin) return void (error = `${registerCredentialType === 'pin' ? 'PINs' : 'Passwords'} don't match`);
+		if (registerPassword !== registerConfirmPassword) return void (error = "Passwords don't match");
 		submitting = true;
 		try {
 			const result = await api.post<{ token?: string; username?: string; role?: 'owner' | 'admin' | 'user'; pending?: boolean }>('/register', {
 				username: registerUsername.trim(),
 				email: registerEmail.trim() || null,
-				...(registerCredentialType === 'pin' ? { pin: registerPin } : { password: registerPin })
+				password: registerPassword
 			});
 			if (result.pending) {
 				registerMessage = 'Registration request sent. An owner or admin must approve it before login.';
-				registerPin = '';
-				registerConfirmPin = '';
+				registerPassword = '';
+				registerConfirmPassword = '';
 				return;
 			}
 			if (result.token && result.username && result.role) {
@@ -221,23 +217,23 @@
 			<Card class="border-border/80 bg-card/90 shadow-xl shadow-black/25 backdrop-blur">
 				<CardContent class="pt-5">
 					{#if forcedToken}
-						<form class="space-y-4" onsubmit={changeTemporaryPin}>
+						<form class="space-y-4" onsubmit={changeTemporaryPassword}>
 							<div class="space-y-1">
-								<p class="text-sm font-medium">Change temporary PIN</p>
-								<p class="text-sm text-muted-foreground">PIN 0000 is temporary. Choose a different 4-10 digit PIN before continuing.</p>
+								<p class="text-sm font-medium">Change temporary password</p>
+								<p class="text-sm text-muted-foreground">Your temporary credential must be replaced with a password before continuing.</p>
 							</div>
 							<div class="space-y-1.5">
-								<label for="new-pin" class="text-sm font-medium">New PIN</label>
-								<Input id="new-pin" type="password" inputmode="numeric" autocomplete="new-password" bind:value={newPin} placeholder="New PIN" />
+								<label for="new-password" class="text-sm font-medium">New password</label>
+								<Input id="new-password" type="password" inputmode="numeric" autocomplete="new-password" bind:value={newPin} placeholder="New PIN" />
 							</div>
 							<div class="space-y-1.5">
-								<label for="confirm-pin" class="text-sm font-medium">Confirm PIN</label>
+								<label for="confirm-pin" class="text-sm font-medium">Confirm password</label>
 								<Input id="confirm-pin" type="password" inputmode="numeric" autocomplete="new-password" bind:value={confirmPin} placeholder="Confirm PIN" />
 							</div>
 							{#if error}<p class="text-sm text-destructive">{error}</p>{/if}
 							<Button type="submit" class="w-full" disabled={submitting}>
 								{#if submitting}<LoaderCircle class="size-4 animate-spin" />{/if}
-								Set new PIN
+								Set new password
 							</Button>
 						</form>
 					{:else}
@@ -262,19 +258,14 @@
 									<Input id="register-email" type="email" bind:value={registerEmail} autocomplete="email" placeholder="Email address" />
 								</div>
 								<label class="space-y-1.5 text-sm">
-									<span>Credential type</span>
-									<select bind:value={registerCredentialType} class="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" onchange={() => { registerPin = ''; registerConfirmPin = ''; error = ''; }}>
-										<option value="password">Password</option>
-										<option value="pin">8-digit PIN</option>
-									</select>
-								</label>
+									<span>Credential type</span></label>
 								<div class="space-y-1.5">
-									<label for="register-pin" class="text-sm font-medium">{registerCredentialType === 'pin' ? 'PIN' : 'Password'}</label>
-									<Input id="register-pin" type="password" inputmode={registerCredentialType === 'pin' ? 'numeric' : 'text'} bind:value={registerPin} autocomplete="new-password" placeholder={registerCredentialType === 'pin' ? '8 digits' : '8+ chars, letter and number'} />
+									<label for="register-pin" class="text-sm font-medium">Password</label>
+									<Input id="register-password" type="password" bind:value={registerPassword} autocomplete="new-password" placeholder="8+ chars, letter and number" />
 								</div>
 								<div class="space-y-1.5">
-									<label for="register-confirm-pin" class="text-sm font-medium">Confirm {registerCredentialType === 'pin' ? 'PIN' : 'password'}</label>
-									<Input id="register-confirm-pin" type="password" inputmode={registerCredentialType === 'pin' ? 'numeric' : 'text'} bind:value={registerConfirmPin} autocomplete="new-password" placeholder={registerCredentialType === 'pin' ? 'Confirm PIN' : 'Confirm password'} />
+									<label for="register-confirm-pin" class="text-sm font-medium">Confirm password</label>
+									<Input id="register-confirm-password" type="password" bind:value={registerConfirmPassword} autocomplete="new-password" placeholder="Confirm password" />
 								</div>
 								{#if error}<p class="text-sm text-destructive">{error}</p>{/if}
 								{#if registerMessage}<p class="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">{registerMessage}</p>{/if}
@@ -290,11 +281,11 @@
 								<Input id="username" bind:value={username} autocomplete="username" placeholder="Username" />
 							</div>
 							<div class="space-y-1.5">
-								<label for="pin" class="text-sm font-medium">Password or PIN</label>
+								<label for="pin" class="text-sm font-medium">Password</label>
 								<div class="relative">
-									<Input id="pin" type={showPin ? 'text' : 'password'} bind:value={pin} autocomplete="current-password" placeholder="Password or PIN" class="pr-9" />
-									<button type="button" class="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onclick={() => (showPin = !showPin)} aria-label={showPin ? 'Hide PIN' : 'Show PIN'}>
-										{#if showPin}<EyeOff class="size-4" />{:else}<Eye class="size-4" />{/if}
+									<Input id="pin" type={showPassword ? 'text' : 'password'} bind:value={password} autocomplete="current-password" placeholder="Password" class="pr-9" />
+									<button type="button" class="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onclick={() => (showPassword = !showPassword)} aria-label={showPassword ? 'Hide password' : 'Show password'}>
+										{#if showPassword}<EyeOff class="size-4" />{:else}<Eye class="size-4" />{/if}
 									</button>
 								</div>
 							</div>
