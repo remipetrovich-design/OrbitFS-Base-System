@@ -18,10 +18,11 @@ export async function POST({ request, cookies, url, getClientAddress }) {
 
 		const body = await request.json().catch(() => ({}));
 		const username = String(body.username ?? '').trim();
-		const pin = String(body.pin ?? '');
+		const password = String(body.password ?? '');
 		const email = String(body.email ?? '').trim().toLowerCase() || null;
 		if (!/^[a-zA-Z0-9._-]{2,40}$/.test(username)) return json({ error: 'Username must be 2-40 letters, numbers, dots, underscores or dashes' }, { status: 400 });
-		if (!/^\d{4,10}$/.test(pin) || pin === '0000') return json({ error: 'Choose a 4-10 digit PIN other than 0000' }, { status: 400 });
+		if (password.length < 8 || password.length > 128 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) return json({ error: 'Password must be 8-128 characters and include a letter and number' }, { status: 400 });
+		if (password.toLowerCase().includes(username.toLowerCase())) return json({ error: 'Password cannot include the username' }, { status: 400 });
 		if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'Enter a valid email address' }, { status: 400 });
 
 		const supabase = getSupabaseAdmin();
@@ -30,7 +31,7 @@ export async function POST({ request, cookies, url, getClientAddress }) {
 			username,
 			display_name: username,
 			email,
-			password_hash: hashPassword(pin),
+			password_hash: hashPassword(password),
 			role: 'owner',
 			status: 'active',
 			permissions,
