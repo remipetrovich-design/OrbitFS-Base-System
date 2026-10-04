@@ -134,9 +134,7 @@
 		registerMessage = '';
 		if (!registerUsername.trim()) return void (error = 'Username is required');
 		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registerEmail.trim())) return void (error = 'Enter a valid email address');
-		if (registerPassword.length < 8 || registerPassword.length > 128 || !/[A-Za-z]/.test(registerPassword) || !/\d/.test(registerPassword)) return void (error = 'Password must be 8-128 characters and include a letter and a number'); else {
-			if (registerPin.length < 8 || registerPin.length > 128 || !/[A-Za-z]/.test(registerPin) || !/\d/.test(registerPin)) return void (error = 'Password must be 8-128 characters and include a letter and a number');
-		}
+		if (registerPassword.length < 8 || registerPassword.length > 128 || !/[A-Za-z]/.test(registerPassword) || !/\d/.test(registerPassword)) return void (error = 'Password must be 8-128 characters and include a letter and a number');
 		if (registerPassword !== registerConfirmPassword) return void (error = "Passwords don't match");
 		submitting = true;
 		try {
@@ -224,11 +222,11 @@
 							</div>
 							<div class="space-y-1.5">
 								<label for="new-password" class="text-sm font-medium">New password</label>
-								<Input id="new-password" type="password" inputmode="numeric" autocomplete="new-password" bind:value={newPin} placeholder="New PIN" />
+								<Input id="new-password" type="password" autocomplete="new-password" bind:value={newPassword} placeholder="New password" />
 							</div>
 							<div class="space-y-1.5">
-								<label for="confirm-pin" class="text-sm font-medium">Confirm password</label>
-								<Input id="confirm-pin" type="password" inputmode="numeric" autocomplete="new-password" bind:value={confirmPin} placeholder="Confirm PIN" />
+								<label for="confirm-password" class="text-sm font-medium">Confirm password</label>
+								<Input id="confirm-password" type="password" autocomplete="new-password" bind:value={confirmPassword} placeholder="Confirm password" />
 							</div>
 							{#if error}<p class="text-sm text-destructive">{error}</p>{/if}
 							<Button type="submit" class="w-full" disabled={submitting}>
@@ -257,14 +255,12 @@
 									<label for="register-email" class="text-sm font-medium">Email</label>
 									<Input id="register-email" type="email" bind:value={registerEmail} autocomplete="email" placeholder="Email address" />
 								</div>
-								<label class="space-y-1.5 text-sm">
-									<span>Credential type</span></label>
-								<div class="space-y-1.5">
-									<label for="register-pin" class="text-sm font-medium">Password</label>
+<div class="space-y-1.5">
+									<label for="register-password" class="text-sm font-medium">Password</label>
 									<Input id="register-password" type="password" bind:value={registerPassword} autocomplete="new-password" placeholder="8+ chars, letter and number" />
 								</div>
 								<div class="space-y-1.5">
-									<label for="register-confirm-pin" class="text-sm font-medium">Confirm password</label>
+									<label for="register-confirm-password" class="text-sm font-medium">Confirm password</label>
 									<Input id="register-confirm-password" type="password" bind:value={registerConfirmPassword} autocomplete="new-password" placeholder="Confirm password" />
 								</div>
 								{#if error}<p class="text-sm text-destructive">{error}</p>{/if}
@@ -281,9 +277,9 @@
 								<Input id="username" bind:value={username} autocomplete="username" placeholder="Username" />
 							</div>
 							<div class="space-y-1.5">
-								<label for="pin" class="text-sm font-medium">Password</label>
+								<label for="password" class="text-sm font-medium">Password</label>
 								<div class="relative">
-									<Input id="pin" type={showPassword ? 'text' : 'password'} bind:value={password} autocomplete="current-password" placeholder="Password" class="pr-9" />
+									<Input id="password" type={showPassword ? 'text' : 'password'} bind:value={password} autocomplete="current-password" placeholder="Password" class="pr-9" />
 									<button type="button" class="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onclick={() => (showPassword = !showPassword)} aria-label={showPassword ? 'Hide password' : 'Show password'}>
 										{#if showPassword}<EyeOff class="size-4" />{:else}<Eye class="size-4" />{/if}
 									</button>
