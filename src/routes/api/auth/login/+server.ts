@@ -6,8 +6,8 @@ import { writeAudit } from '$lib/server/audit';
 export async function POST({ request, cookies, url, getClientAddress }) {
 	const body = await request.json().catch(() => ({}));
 	const identity = String(body.identity ?? body.username ?? '').trim();
-	const credential = String(body.password ?? body.pin ?? '');
-	if (!identity || !credential) return json({ error:'Username/email and password or PIN are required' }, { status:400 });
+	const credential = String(body.password ?? '');
+	if (!identity || !credential) return json({ error:'Username/email and password are required' }, { status:400 });
 	const supabase = getSupabaseAdmin();
 	let user;
 	try { user = await authenticateOrbitCredentials(identity, credential); }
