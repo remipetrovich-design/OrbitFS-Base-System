@@ -34,3 +34,5 @@ jobs:
           echo "Dispatched Base repair candidate from $SOURCE_SHA"
 
 # retry after License Manager authority fix
+
+# retry-marker: database-repair
