@@ -8,7 +8,7 @@
 
 	let username = $state('');
 	let email = $state('');
-	let pin = $state('');
+	let password = $state('');
 	let loading = $state(true);
 	let submitting = $state(false);
 	let error = $state('');
@@ -37,7 +37,7 @@
 		error = '';
 		submitting = true;
 		try {
-			const result = await api.post<{ token: string; username: string; role: 'owner' | 'admin' | 'user' }>('/setup/owner', { username, email, pin });
+			const result = await api.post<{ token: string; username: string; role: 'owner' | 'admin' | 'user' }>('/setup/owner', { username, email, password });
 			auth.set(result.token, { username: result.username, role: result.role, email: email || null });
 			await goto('/setup');
 		} catch (err) {
@@ -64,7 +64,7 @@
 			{:else}
 				<div class="rounded-md border border-primary/30 bg-primary/10 p-3 text-sm">
 					<div class="flex items-center gap-2 font-medium"><ShieldCheck class="size-4" />Owner account</div>
-					<p class="mt-1 text-muted-foreground">Use a real username and a 4-10 digit PIN. This signs you in immediately after creation.</p>
+					<p class="mt-1 text-muted-foreground">Use a real username and a strong password. This signs you in immediately after creation.</p>
 				</div>
 				<form class="space-y-4" onsubmit={submit}>
 					<div class="space-y-1.5">
@@ -76,8 +76,8 @@
 						<Input id="email" type="email" bind:value={email} autocomplete="email" placeholder="owner@example.com" />
 					</div>
 					<div class="space-y-1.5">
-						<label for="pin" class="text-sm font-medium">PIN</label>
-						<Input id="pin" type="password" bind:value={pin} autocomplete="new-password" placeholder="4-10 digit PIN" />
+						<label for="password" class="text-sm font-medium">Password</label>
+						<Input id="password" type="password" bind:value={password} autocomplete="new-password" placeholder="8+ characters, including a letter and number" />
 					</div>
 					{#if error}<p class="text-sm text-destructive">{error}</p>{/if}
 					<div class="flex gap-2">
