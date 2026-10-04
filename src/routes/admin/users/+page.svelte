@@ -35,7 +35,7 @@
 	let formOpen = $state(false);
 	let editingUsername = $state<string | null>(null);
 	let formUsername = $state('');
-	let formPin = $state('');
+	let formPassword = $state('');
 	let formRole = $state<'owner' | 'admin' | 'user'>('user');
 	let formEmail = $state('');
 	let formStatus = $state<'active' | 'inactive' | 'banned'>('active');
@@ -123,7 +123,7 @@
 	function openCreate() {
 		editingUsername = null;
 		formUsername = '';
-		formPin = '';
+		formPassword = '';
 		formRole = 'user';
 		formEmail = '';
 		formStatus = 'active';
@@ -136,7 +136,7 @@
 	function openEdit(user: PanelUser) {
 		editingUsername = user.username;
 		formUsername = user.username;
-		formPin = '';
+		formPassword = '';
 		formRole = user.role === 'owner' ? 'admin' : user.role;
 		formEmail = user.email ?? '';
 		formStatus = user.status;
@@ -150,12 +150,12 @@
 		event.preventDefault();
 		formError = '';
 		if (!formUsername.trim()) return void (formError = 'Username is required');
-		if (!editingUsername && !/^\d{4,10}$/.test(formPin)) return void (formError = 'PIN must be 4-10 digits');
-		if (editingUsername && formPin && !/^\d{4,10}$/.test(formPin)) return void (formError = 'New PIN must be 4-10 digits');
+		if (!editingUsername && (formPassword.length < 8 || formPassword.length > 128 || !/[A-Za-z]/.test(formPassword) || !/\d/.test(formPassword))) return void (formError = 'Password must be 8-128 characters and include a letter and number');
+		if (editingUsername && formPassword && (formPassword.length < 8 || formPassword.length > 128 || !/[A-Za-z]/.test(formPassword) || !/\d/.test(formPassword))) return void (formError = 'New password must be 8-128 characters and include a letter and number');
 		saving = true;
 		try {
 			await api.post('/users', {
-				username: formUsername.trim(), pin: formPin, role: formRole, email: formEmail.trim() || null,
+				username: formUsername.trim(), password: formPassword, role: formRole, email: formEmail.trim() || null,
 				status: formStatus, banReason: formBanReason.trim(), permissions: formPermissions
 			});
 			formOpen = false;
@@ -282,7 +282,7 @@
 				<form class="space-y-4" onsubmit={saveUser}>
 					<div class="grid gap-3 sm:grid-cols-2">
 						<label class="space-y-1.5 text-sm"><span>Username</span><Input bind:value={formUsername} disabled={!!editingUsername} /></label>
-						<label class="space-y-1.5 text-sm"><span>{editingUsername ? 'New PIN' : 'PIN'}</span><Input type="password" bind:value={formPin} placeholder={editingUsername ? 'Leave blank to keep current PIN' : '4-10 digits'} /></label>
+						<label class="space-y-1.5 text-sm"><span>{editingUsername ? 'New password' : 'Password'}</span><Input type="password" bind:value={formPassword} placeholder={editingUsername ? 'Leave blank to keep current password' : '8+ characters, letter and number'} /></label>
 						<label class="space-y-1.5 text-sm"><span>Email</span><Input type="email" bind:value={formEmail} /></label>
 						<label class="space-y-1.5 text-sm"><span>Panel role</span>
 							<select bind:value={formRole} class="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"><option value="user">User</option><option value="admin">Admin</option></select>
