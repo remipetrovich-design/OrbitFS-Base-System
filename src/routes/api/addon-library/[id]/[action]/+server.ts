@@ -8,7 +8,6 @@ import { assertSharedEngineHostReady, getSharedEngineHostState } from '$lib/serv
 import { confirmEngineHostDetach, confirmEngineHostPairing, readRemoteEngineHostLink, readSharedEngineHostLink } from '$lib/server/engine-host-remote';
 import { syncApexKnowledgeToMcp } from '$lib/server/apex-mcp-integration';
 import { writeAudit } from '$lib/server/audit';
-import { provisionSharedEngineHost } from '$lib/server/vercel-engine-provision';
 
 const fail=(e:any)=>json({error:String(e?.message||'Request failed'),code:String(e?.code||'ADDON_LIBRARY_ERROR')},{status:Number(e?.status||500)});
 const defaultEngineMode=(id:string)=>id==='mcp'?'running':'standby';
@@ -43,45 +42,30 @@ export async function POST({params,cookies}:any){
         return json({ok:true,addon,host:null});
       }
 
+      const host=await assertSharedEngineHostReady();
       const previousMode=String(row.runtime?.engineMode||'');
-      const requestedAt=new Date().toISOString();
-      await saveCloudAddon(id,{
-        installed:false,
-        attached:false,
-        configured:false,
-        status:'installing',
-        installed_at:null,
-        transport_path:row.transport_path??manifest.transportPath??null,
-        runtime:{
-          ...(row.runtime||{}),
-          mode:'engine-host',
-          engineMode:id==='mcp'?(previousMode==='stopped'?'stopped':'running'):(previousMode||defaultEngineMode(id)),
-          setupState:row.runtime?.setupState||'not_started',
-          pendingInstall:true,
-          desiredInstalled:true,
-          installState:'provisioning',
-          installRequestedAt:requestedAt,
-          installRequestedByUserId:String(user.id),
-          autoAttachPending:true,
-          lastManualDetachAt:null,
-          compute:'vercel',
-          database:'shared-panel',
-          online:false
-        }
-      });
+      const stamp=new Date().toISOString();
+      await saveCloudAddon(id,{installed:false,attached:false,configured:false,status:'installing',installed_at:null,transport_path:row.transport_path??manifest.transportPath??null,runtime:{
+        ...(row.runtime||{}),mode:'engine-host',engineMode:id==='mcp'?(previousMode==='stopped'?'stopped':'running'):(previousMode||defaultEngineMode(id)),
+        setupState:row.runtime?.setupState||'not_started',pendingInstall:true,desiredInstalled:true,installState:'pairing',
+        installRequestedAt:stamp,installRequestedByUserId:String(user.id),autoAttachPending:true,lastManualDetachAt:null,compute:'vercel',database:'shared-panel',online:false
+      }});
       try{
-        await provisionSharedEngineHost({components:[id],actorUserId:user.id,actorUsername:user.username});
+        const attach=await getEngineAttachContext(id,String(user.id));
+        const remote=await confirmEngineHostPairing({engineId:id,installationId:attach.installationId,panelUrl:attach.panelUrl,workspaceId:attach.workspaceId,actorUserId:String(user.id)});
+        const paired=await getCloudAddon(id);
+        const runtime=paired.runtime&&typeof paired.runtime==='object'?paired.runtime:{};
+        await saveCloudAddon(id,{installed:true,attached:true,status:'attached',installed_at:paired.installed_at||stamp,runtime:{...runtime,pendingInstall:false,desiredInstalled:true,installState:'installed',autoAttachPending:false,lastAttachAt:stamp,installError:null,installErrorCode:null}});
+        await writeAudit({actorUserId:user.id,action:'addon.install.complete',targetType:'addon',targetId:id,detail:{libraryApi:true,engineHost:true,hostUrl:host.hostUrl,remoteConfirmed:true}});
+        return json({ok:true,waiting:false,addon:await presentAddon(await getCloudAddon(id)),host,engineHost:remote});
       }catch(error:any){
         const current=await getCloudAddon(id).catch(()=>null);
         if(current){
           const runtime=current.runtime&&typeof current.runtime==='object'?current.runtime:{};
-          await saveCloudAddon(id,{installed:false,attached:false,configured:false,status:'install_error',runtime:{...runtime,pendingInstall:false,desiredInstalled:false,installState:'error',installError:String(error?.message||'Engine provisioning failed'),installErrorCode:String(error?.code||'ADDON_INSTALL_ERROR'),online:false}}).catch(()=>undefined);
+          await saveCloudAddon(id,{installed:false,attached:false,configured:false,status:'install_error',runtime:{...runtime,pendingInstall:false,desiredInstalled:false,installState:'error',installError:String(error?.message||'Plugin installation failed'),installErrorCode:String(error?.code||'ADDON_INSTALL_ERROR'),online:false}}).catch(()=>undefined);
         }
         throw error;
       }
-      const host=await getSharedEngineHostState();
-      await writeAudit({actorUserId:user.id,action:'addon.install.started',targetType:'addon',targetId:id,detail:{libraryApi:true,engineHost:true,hostState:host.state}}).catch(()=>undefined);
-      return json({ok:true,waiting:true,phase:'provisioning',addon:await presentAddon(await getCloudAddon(id)),host},{status:202});
     }
 
     let row=await getCloudAddon(id);
