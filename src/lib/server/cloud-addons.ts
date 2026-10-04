@@ -54,6 +54,33 @@ export async function addonLicenseAccess(component?:string|null, summaryOverride
 }
 
 export async function addonLicensed(component?:string|null){return(await addonLicenseAccess(component)).licensed;}
+export async function engineHostBootstrapEntitlement(options:{activate?:boolean;refresh?:boolean}={}){
+	const engineIds=Object.keys(CLOUD_ADDON_MANIFESTS).filter((id)=>CLOUD_ADDON_MANIFESTS[id]?.runtimeMode==='engine-host');
+	let summary=await getPanelLicenseSummary({refresh:options.refresh===true,requireAuthority:options.refresh===true});
+	if(!summary.valid){
+		return {eligible:false,componentId:null,licenseComponent:null,reason:String(summary.refreshError||summary.reason||'LICENSE_REQUIRED'),licensedIds:[] as string[]};
+	}
+	const entitled=engineIds.filter((id)=>{
+		const licenseComponent=String(CLOUD_ADDON_MANIFESTS[id]?.licenseComponent||'').trim();
+		const item=summary.components?.[licenseComponent];
+		return item?.allowed===true;
+	});
+	if(!entitled.length)return {eligible:false,componentId:null,licenseComponent:null,reason:'ENGINE_ADDON_LICENSE_REQUIRED',licensedIds:[] as string[]};
+
+	for(const id of entitled){
+		const licenseComponent=String(CLOUD_ADDON_MANIFESTS[id]?.licenseComponent||'').trim();
+		let access=await addonLicenseAccess(licenseComponent,summary);
+		if(access.licensed)return {eligible:true,componentId:id,licenseComponent,reason:null,licensedIds:entitled};
+		if(options.activate===true&&access.allowed&&access.reason==='activation_required'){
+			await activateLicenseComponent(licenseComponent);
+			summary=await getPanelLicenseSummary({refresh:true,requireAuthority:true});
+			access=await addonLicenseAccess(licenseComponent,summary);
+			if(access.licensed)return {eligible:true,componentId:id,licenseComponent,reason:null,licensedIds:entitled};
+		}
+	}
+	return {eligible:options.activate!==true,componentId:entitled[0]||null,licenseComponent:entitled[0]?String(CLOUD_ADDON_MANIFESTS[entitled[0]]?.licenseComponent||'').trim():null,reason:options.activate===true?'LICENSE_COMPONENT_ACTIVATION_REQUIRED':null,licensedIds:entitled};
+}
+
 
 export async function assertAddonLicensed(component?:string|null,activateEntitled=true){
 	const initialSummary=activateEntitled?await getPanelLicenseSummary({refresh:true,requireAuthority:true}):undefined;
