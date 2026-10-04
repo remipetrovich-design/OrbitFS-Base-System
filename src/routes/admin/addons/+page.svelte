@@ -49,8 +49,7 @@
 	const sleep=(ms:number)=>new Promise((resolve)=>setTimeout(resolve,ms));
 	const recordAttached=(a:Addon)=>a.recordAttached===true||a.attached===true;
 	const engineUrl=(a:Addon)=>a.engineManageUrl||(host?.hostUrl?`${host.hostUrl}/engines/${a.id}`:'');
-	const hasEngineComponent=()=>addons.some((addon)=>addon.installed||addon.installStatus==='installing');
-
+	
 	function availability(a:Addon){
 		if(!a.available)return 'Unavailable';
 		if(a.licenseAllowed===false)return 'Not licensed';
@@ -211,7 +210,7 @@
 		<div>
 			<div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-[.16em] text-primary"><Puzzle class="size-4"/> Add-on Library</div>
 			<h1 class="mt-1 text-2xl font-semibold">OrbitFS Add-on Library</h1>
-			<p class="text-sm text-muted-foreground">The Panel only installs and links licensed add-ons. Add-on setup, configuration and runtime live in the shared OrbitFS Engine.</p>
+			<p class="text-sm text-muted-foreground">Deployment order is fixed: Inner Deploy → Shared Engine → licensed plugin. Plugins never create or replace the shared host.</p>
 		</div>
 		<Button variant="outline" onclick={()=>load()} disabled={loading||polling}><RefreshCw class="size-4"/>Refresh</Button>
 	</header>
@@ -224,7 +223,7 @@
 		<Card>
 			<CardHeader>
 				<div class="flex flex-wrap items-start justify-between gap-3">
-					<div><CardTitle>Shared OrbitFS Engine</CardTitle><CardDescription>One Engine deployment runs every installed Engine add-on for this customer.</CardDescription></div>
+					<div><CardTitle>Shared OrbitFS Engine</CardTitle><CardDescription>One shared Engine deployment runs all licensed plugins for this customer. Deploy it before installing any plugin.</CardDescription></div>
 					<Badge variant={hostReady()?'success':host?.state==='error'?'destructive':'outline'}>{hostLabel()}</Badge>
 				</div>
 			</CardHeader>
@@ -254,16 +253,15 @@
 					</div>
 				{/if}
 				<div class="flex flex-wrap gap-2">
-					{#if host?.state==='not_deployed'&&hasEngineComponent()}
+					{#if host?.state==='not_deployed'}
 						{#if provisioningAvailable}
-							<Button onclick={()=>hostAct('provision')} disabled={busy!==''}><Server class="size-4"/>Deploy Engine</Button>
+							<Button onclick={()=>hostAct('provision')} disabled={busy!==''}><Server class="size-4"/>Inner Deploy · Shared Engine</Button>
 						{:else if provisioningMissing.includes('Vercel connection')}
-							<Button onclick={()=>showVercelConnection=true} disabled={busy!==''}><Server class="size-4"/>Connect Vercel &amp; Deploy Engine</Button>
+							<Button onclick={()=>showVercelConnection=true} disabled={busy!==''}><Server class="size-4"/>Connect Vercel &amp; Inner Deploy</Button>
 						{:else}
-							<Button disabled><Server class="size-4"/>Engine prerequisites missing</Button>
+							<Button disabled><Server class="size-4"/>Inner deployment prerequisites missing</Button>
 						{/if}
-					{:else if host?.state==='not_deployed'}
-						<p class="text-sm text-muted-foreground">Install a licensed add-on below. OrbitFS will deploy and link the Shared Engine automatically as part of that install.</p>
+						<p class="text-sm text-muted-foreground">Deploy and link the shared Inner environment first. Licensed plugins are installed into it afterwards and never create their own host.</p>
 					{/if}
 					{#if hostAdvancing()}<Button disabled><LoaderCircle class="size-4 animate-spin"/>Deploying &amp; linking</Button>{/if}
 					{#if host?.state==='error'&&provisioningAvailable}<Button onclick={()=>hostAct('provision',{releaseId:host?.releaseId||undefined,releaseChannel:host?.releaseChannel||undefined,forceRedeploy:true})} disabled={busy!==''}>Retry Engine</Button>{/if}
@@ -325,7 +323,7 @@
 							{:else if addon.licenseAllowed===false}
 								<Button disabled>Licence required</Button>
 							{:else}
-								{#if !addon.installed}<Button onclick={()=>addonAct(addon.id,'install')} disabled={busy!==''||addon.installStatus==='installing'}>{#if addon.installStatus==='installing'}<LoaderCircle class="size-4 animate-spin"/>Installing…{:else}Install{/if}</Button>{/if}
+								{#if !addon.installed}<Button onclick={()=>addonAct(addon.id,'install')} disabled={busy!==''||addon.installStatus==='installing'||!hostReady()}>{#if addon.installStatus==='installing'}<LoaderCircle class="size-4 animate-spin"/>Installing…{:else}{hostReady()?'Install':'Deploy Shared Engine first'}{/if}</Button>{/if}
 								{#if addon.installed&&!recordAttached(addon)}<Button onclick={()=>addonAct(addon.id,'link')} disabled={busy!==''||!hostReady()}><PlugZap class="size-4"/>Link to Engine</Button>{/if}
 								{#if recordAttached(addon)&&addon.licensed&&engineUrl(addon)}<a href={engineUrl(addon)} target="_blank" rel="noreferrer" class="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"><ExternalLink class="size-4"/>Open in Engine</a>{/if}
 							{/if}
