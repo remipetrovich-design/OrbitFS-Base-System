@@ -12,7 +12,7 @@ import { getSupabaseAdmin } from '$lib/server/supabase';
 import { engineDatabaseCredentials, engineSharedSecret } from '$lib/server/runtime-secrets';
 import { resolveInstalledBaseVersion } from '$lib/server/base-release-state';
 import { resolveUpdaterProviderBase } from '$lib/server/updater-connection';
-import { assertAddonLicensed, CLOUD_ADDON_MANIFESTS, prepareInstalledEngineAddonLicenses } from '$lib/server/cloud-addons';
+import { assertAddonLicensed, CLOUD_ADDON_MANIFESTS, prepareInstalledEngineAddonLicenses, engineHostBootstrapEntitlement } from '$lib/server/cloud-addons';
 import { fetchEngineDatabasePackageSet } from '$lib/server/database-package-registry';
 
 const API = 'https://api.vercel.com';
@@ -88,12 +88,24 @@ export async function scopeEngineReleaseForInstalledLicenses(release:any,request
 		}
 	}
 
-	const targetComponents=[...new Set([
+	let targetComponents=[...new Set([
 		...installedAuthorized,
 		...(explicitRequested.length?requestedAuthorized:[])
 	])];
+
+	// First Shared Engine deployment happens before plugin installation. If no
+	// plugin is installed yet, use one authoritative add-on entitlement only as
+	// the bootstrap authorization for the shared runtime. This does NOT mark the
+	// add-on installed or attached.
+	if(!targetComponents.length&&!explicitRequested.length){
+		const bootstrap=await engineHostBootstrapEntitlement({activate:true,refresh:true});
+		if(!bootstrap.eligible||!bootstrap.componentId){
+			throw fail('At least one active OrbitFS add-on licence is required before deploying the Shared Engine Host.',403,'ENGINE_ADDON_LICENSE_REQUIRED');
+		}
+		targetComponents=[bootstrap.componentId];
+	}
 	if(!targetComponents.length){
-		throw fail('Activate an entitled Engine add-on before deploying the Shared Engine Host.',409,'ENGINE_COMPONENT_REQUIRED');
+		throw fail('At least one active OrbitFS add-on licence is required before deploying the Shared Engine Host.',403,'ENGINE_ADDON_LICENSE_REQUIRED');
 	}
 	return {
 		release:scopeEngineReleaseForExecution(release,targetComponents),
@@ -833,7 +845,11 @@ export async function engineHostProvisioningStatus() {
 	const database=engineDatabaseCredentials();
 	const baseVersion=await resolveInstalledBaseVersion();
 	let licenseProviderAvailable=false;
-	try{licenseProviderAvailable=Boolean((await getLicenseProviderSettings()).providerBase);}catch{}
+	let bootstrapEntitlement:{eligible:boolean;componentId:string|null;licenseComponent:string|null;reason:string|null;licensedIds:string[]}={eligible:false,componentId:null,licenseComponent:null,reason:'LICENSE_REQUIRED',licensedIds:[]};
+	try{
+		licenseProviderAvailable=Boolean((await getLicenseProviderSettings()).providerBase);
+		if(licenseProviderAvailable)bootstrapEntitlement=await engineHostBootstrapEntitlement();
+	}catch{}
 	const missing:string[]=[];
 	if(!credentials.token) missing.push('Vercel connection');
 	if(!String(env.SUPABASE_URL||'').trim()) missing.push('SUPABASE_URL');
@@ -843,7 +859,8 @@ export async function engineHostProvisioningStatus() {
 	try{engineDatabaseRuntimeAccessContract();}catch{missing.push('License Manager database runtime access contract');}
 	if(!engineSharedSecret()) missing.push('Engine shared secret');
 	if(!licenseProviderAvailable) missing.push('official licence provider');
-	return {available:missing.length===0,missing,vercelConnected:Boolean(credentials.token),databaseCredentialMode:database.mode==='server-secret'?(database.derived?'derived-server-secret':'server-secret'):database.mode,baseVersion,baseVersionKnown:Boolean(baseVersion)};
+	if(licenseProviderAvailable&&!bootstrapEntitlement.eligible) missing.push('active OrbitFS add-on licence');
+	return {available:missing.length===0,missing,vercelConnected:Boolean(credentials.token),databaseCredentialMode:database.mode==='server-secret'?(database.derived?'derived-server-secret':'server-secret'):database.mode,baseVersion,baseVersionKnown:Boolean(baseVersion),bootstrapEntitlement};
 }
 
 export async function engineHostProvisioningAvailable() {
