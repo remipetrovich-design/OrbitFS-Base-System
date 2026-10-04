@@ -3,8 +3,7 @@ import { requireUser } from '$lib/server/auth';
 import { assertPanelLicensed } from '$lib/server/license';
 import { isSystemAdmin } from '$lib/server/workspaces';
 import { assertAddonLicensed, CLOUD_ADDON_MANIFESTS, ensureCloudAddonRecord, getCloudAddon, presentAddon, saveCloudAddon } from '$lib/server/cloud-addons';
-import { getSharedEngineHostState } from '$lib/server/engine-host-state';
-import { provisionSharedEngineHost } from '$lib/server/vercel-engine-provision';
+import { assertSharedEngineHostReady, getSharedEngineHostState } from '$lib/server/engine-host-state';
 import { getEngineAttachContext } from '$lib/server/engine-host';
 import { confirmEngineHostPairing } from '$lib/server/engine-host-remote';
 import { writeAudit } from '$lib/server/audit';
@@ -31,8 +30,7 @@ export async function POST({params,cookies}:any){
 			return json({ok:true,noOp:true,addon:await presentAddon(row),host:isEngineHostAddon(id)?await getSharedEngineHostState():null});
 		}
 
-		// License Manager entitlement/installation lock is established before any
-		// Engine or local install state is mutated.
+		// License Manager remains the authority for whether this plugin may be installed.
 		await assertAddonLicensed(manifest.licenseComponent||row.license_component||null,true);
 
 		const engineHosted=isEngineHostAddon(id);
@@ -43,27 +41,12 @@ export async function POST({params,cookies}:any){
 			return json({ok:true,addon,host:null});
 		}
 
+		// Inner deployment / Shared Engine is a prerequisite. Installing a plugin
+		// must never create, redeploy or replace the shared host.
+		const host=await assertSharedEngineHostReady();
+
 		const previousMode=String(row.runtime?.engineMode||'');
 		const requestedAt=new Date().toISOString();
-		const pendingRuntime={
-			...(row.runtime||{}),
-			mode:'engine-host',
-			engineMode:id==='mcp'?(previousMode==='stopped'?'stopped':'running'):(previousMode||defaultEngineMode(id)),
-			setupState:row.runtime?.setupState||'not_started',
-			pendingInstall:true,
-			desiredInstalled:true,
-			installState:'provisioning',
-			installRequestedAt:requestedAt,
-			installRequestedByUserId:String(user.id),
-			autoAttachPending:true,
-			lastManualDetachAt:null,
-			compute:'vercel',
-			database:'shared-panel',
-			online:false
-		};
-
-		// Crucially: installed stays false until the deployed Engine confirms the
-		// signed pairing. This removes the old installed->deploy circular dependency.
 		await saveCloudAddon(row.id,{
 			installed:false,
 			attached:false,
@@ -71,45 +54,48 @@ export async function POST({params,cookies}:any){
 			status:'installing',
 			installed_at:null,
 			transport_path:row.transport_path??manifest.transportPath??null,
-			runtime:pendingRuntime
+			runtime:{
+				...(row.runtime||{}),
+				mode:'engine-host',
+				engineMode:id==='mcp'?(previousMode==='stopped'?'stopped':'running'):(previousMode||defaultEngineMode(id)),
+				setupState:row.runtime?.setupState||'not_started',
+				pendingInstall:true,
+				desiredInstalled:true,
+				installState:'pairing',
+				installRequestedAt:requestedAt,
+				installRequestedByUserId:String(user.id),
+				autoAttachPending:true,
+				lastManualDetachAt:null,
+				compute:'vercel',
+				database:'shared-panel',
+				online:false
+			}
 		});
 		pendingStarted=true;
 
-		const provisioned:any=await provisionSharedEngineHost({
-			components:[id],
-			actorUserId:user.id,
-			actorUsername:user.username
+		// The Engine shares the customer database. The signed pending-install row
+		// above is therefore visible to the Engine before pairing and is the only
+		// temporary state accepted by pairEngineHost().
+		const attach=await getEngineAttachContext(id,String(user.id));
+		const remote=await confirmEngineHostPairing({
+			engineId:id,
+			installationId:attach.installationId,
+			panelUrl:attach.panelUrl,
+			workspaceId:attach.workspaceId,
+			actorUserId:String(user.id)
 		});
 
-		// If no deployment was needed and the Host is already linked/ready, finish
-		// the install synchronously. Otherwise /engine-host/refresh finalizes it as
-		// soon as the Vercel deployment and Host link are ready.
-		let host=await getSharedEngineHostState();
-		if(provisioned?.noOp===true&&['linked','ready'].includes(String(host.state||''))){
-			const attach=await getEngineAttachContext(id,String(user.id));
-			const remote=await confirmEngineHostPairing({
-				engineId:id,
-				installationId:attach.installationId,
-				panelUrl:attach.panelUrl,
-				workspaceId:attach.workspaceId,
-				actorUserId:String(user.id)
-			});
-			const paired=await getCloudAddon(id);
-			const pairedRuntime=paired.runtime&&typeof paired.runtime==='object'?paired.runtime:{};
-			await saveCloudAddon(id,{
-				installed:true,
-				attached:true,
-				status:'attached',
-				installed_at:paired.installed_at||new Date().toISOString(),
-				runtime:{...pairedRuntime,pendingInstall:false,desiredInstalled:true,installState:'installed',autoAttachPending:false,lastAttachAt:new Date().toISOString()}
-			});
-			await writeAudit({actorUserId:user.id,action:'addon.install.complete',targetType:'addon',targetId:id,detail:{engineHost:true,noDeploymentRequired:true,remoteConfirmed:true}});
-			return json({ok:true,waiting:false,addon:await presentAddon(await getCloudAddon(id)),host,engineHost:remote});
-		}
-
-		host=await getSharedEngineHostState();
-		await writeAudit({actorUserId:user.id,action:'addon.install.started',targetType:'addon',targetId:id,detail:{engineHost:true,hostState:host.state,projectName:host.projectName||null}});
-		return json({ok:true,waiting:true,phase:'provisioning',addon:await presentAddon(await getCloudAddon(id)),host},{status:202});
+		const paired=await getCloudAddon(id);
+		const pairedRuntime=paired.runtime&&typeof paired.runtime==='object'?paired.runtime:{};
+		const addon=await saveCloudAddon(id,{
+			installed:true,
+			attached:true,
+			status:'attached',
+			installed_at:paired.installed_at||new Date().toISOString(),
+			runtime:{...pairedRuntime,pendingInstall:false,desiredInstalled:true,installState:'installed',autoAttachPending:false,lastAttachAt:new Date().toISOString(),installError:null,installErrorCode:null}
+		});
+		await writeAudit({actorUserId:user.id,action:'addon.install.complete',targetType:'addon',targetId:id,detail:{engineHost:true,hostUrl:host.hostUrl,remoteConfirmed:true}});
+		return json({ok:true,waiting:false,addon:await presentAddon(addon),host,engineHost:remote});
 	}catch(e:any){
 		if(id&&pendingStarted){
 			try{
@@ -120,7 +106,7 @@ export async function POST({params,cookies}:any){
 					attached:false,
 					configured:false,
 					status:'install_error',
-					runtime:{...runtime,pendingInstall:false,desiredInstalled:false,installState:'error',installError:String(e?.message||'Engine provisioning failed'),installErrorCode:String(e?.code||'ADDON_INSTALL_ERROR'),online:false}
+					runtime:{...runtime,pendingInstall:false,desiredInstalled:false,installState:'error',installError:String(e?.message||'Plugin installation failed'),installErrorCode:String(e?.code||'ADDON_INSTALL_ERROR'),online:false}
 				});
 			}catch{}
 		}
