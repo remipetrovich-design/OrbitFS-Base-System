@@ -91,21 +91,14 @@ function validatePassword(password: string, username: string, email: string) {
 	if (emailName && emailName.length >= 3 && lower.includes(emailName)) throw Object.assign(new Error('Password cannot include the email name'), { status: 400 });
 }
 
-function validatePin(pin: string) {
-	if (!/^\d{8}$/.test(pin)) throw Object.assign(new Error('PIN must be exactly 8 digits'), { status: 400 });
-	if (/^(\d)\1{7}$/.test(pin) || ['12345678','87654321','00000000'].includes(pin)) throw Object.assign(new Error('Choose a less predictable 8-digit PIN'), { status: 400 });
-}
-
 export function validateAccountInput(body: any = {}) {
 	const username = String(body.username ?? '').trim();
 	const email = String(body.email ?? '').trim().toLowerCase();
 	const password = String(body.password ?? '');
-	const pin = String(body.pin ?? '');
 	if (!/^(?!.*[._-]{2})[a-zA-Z0-9][a-zA-Z0-9._-]{1,30}[a-zA-Z0-9]$/.test(username)) throw Object.assign(new Error('Username must be 3-32 characters, start/end with a letter or number, and only use letters, numbers, dots, underscores, or dashes'), { status: 400 });
 	if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw Object.assign(new Error('Enter a valid email address'), { status: 400 });
-	if (password) { validatePassword(password, username, email); return { username, email, credentialHash: hashPassword(password), credentialType: 'password' as const }; }
-	validatePin(pin);
-	return { username, email, credentialHash: hashPassword(pin), credentialType: 'pin' as const };
+	validatePassword(password, username, email);
+	return { username, email, credentialHash: hashPassword(password), credentialType: 'password' as const };
 }
 export async function usernameAvailable(username: string, excludeRequestId = '') {
 	const supabase = getSupabaseAdmin();
