@@ -135,7 +135,7 @@ export async function emailAvailable(email: string) {
 	return !data;
 }
 
-export async function queueRegistrationRequest(account: { username:string; email:string; credentialHash:string; credentialType:'password'|'pin' }) {
+export async function queueRegistrationRequest(account: { username:string; email:string; credentialHash:string; credentialType:'password' }) {
 	const supabase = getSupabaseAdmin();
 	const { data, error } = await supabase.from('orbitfs_registration_requests').insert({
 		username: account.username,
