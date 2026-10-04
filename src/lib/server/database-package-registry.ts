@@ -115,7 +115,6 @@ export async function fetchCurrentDatabasePackage(component:CustomerDatabaseComp
 			'x-license-key':identity.licenseKey,
 			'x-installation-id':identity.installationId,
 			'x-orbitfs-client':'orbitfs-base-database-deployer',
-			'x-orbitfs-source-repo':EXPECTED_REPO[component],
 			accept:'application/json'
 		},
 		cache:'no-store',
