@@ -1285,6 +1285,14 @@ export async function refreshSharedEngineDeployment(input: Record<string, any> =
 }
 
 export async function provisionSharedEngineHost(input: Record<string, any> = {}) {
+	// The Shared Engine is infrastructure, but it is not free-standing: at least
+	// one authoritative Engine add-on entitlement must exist before first deploy.
+	// This check runs before Vercel/release work so a missing licence cannot leave
+	// behind a half-created host project.
+	const bootstrapEntitlement=await engineHostBootstrapEntitlement({activate:true,refresh:true});
+	if(!bootstrapEntitlement.eligible){
+		throw fail('At least one active OrbitFS add-on licence (MCP, APEX or Studio) is required before deploying the Shared Engine Host.',403,'ENGINE_ADDON_LICENSE_REQUIRED');
+	}
 	const { token, teamId } = await credentialsFrom(input);
 	if (!token) throw fail('Connect Vercel in OrbitFS before deploying the Shared Engine Host.', 409, 'VERCEL_TOKEN_REQUIRED');
 	let current = await getSharedEngineHostState();
