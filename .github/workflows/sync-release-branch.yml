@@ -78,21 +78,28 @@ jobs:
         if: steps.profile.outputs.run == 'true'
         run: npm ci
 
-      - name: Reject Base release history rewrites
+      - name: Validate Base release database history
         if: steps.profile.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin base-release --prune
-          git merge-base --is-ancestor origin/base-release HEAD || {
-            echo "::error::base-release diverged from main. Reconcile history without force-pushing."
-            exit 1
-          }
-          changed="$(git diff --name-status origin/base-release HEAD -- supabase/migrations)"
+          current="$(git rev-parse origin/base-release)"
+          target="$(git rev-parse HEAD)"
+
+          changed="$(git diff --name-status "$current" "$target" -- supabase/migrations)"
           if printf '%s\n' "$changed" | awk 'NF && $NF ~ /[.]sql$/ && $1 != "A" {bad=1; print "Immutable Base migration changed or deleted: " $0} END {exit !bad}'; then
-            echo "::error::Published Base migration files may not be modified or deleted. Add a new migration."
+            echo "::error::Published Base migration files may not be modified or deleted. Add a new forward migration instead."
             exit 1
           fi
+
+          if git merge-base --is-ancestor "$current" "$target"; then
+            echo "base-release can fast-forward to validated main."
+          else
+            echo "base-release history diverged; promotion will preserve its history with a reconciliation commit whose tree is validated main."
+          fi
+          echo "Base migration tree validated at $target"
+          git ls-tree -r HEAD supabase/migrations | sha256sum
 
       - name: Typecheck
         if: steps.profile.outputs.run == 'true'
@@ -143,16 +150,51 @@ jobs:
         run: |
           set -euo pipefail
           current="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$RELEASE_BRANCH" --jq '.object.sha' 2>/dev/null || true)"
+          promoted_sha="$TARGET_SHA"
+
           if [ -z "$current" ]; then
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$RELEASE_BRANCH" -f sha="$TARGET_SHA" >/dev/null
-          elif [ "$current" != "$TARGET_SHA" ]; then
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$RELEASE_BRANCH" -f sha="$TARGET_SHA" -F force=false >/dev/null
+          elif [ "$current" = "$TARGET_SHA" ]; then
+            echo "$RELEASE_BRANCH already matches validated main."
+          else
+            git fetch origin "$RELEASE_BRANCH" --prune
+            fetched="$(git rev-parse "origin/$RELEASE_BRANCH")"
+            test "$fetched" = "$current" || {
+              echo "::error::$RELEASE_BRANCH moved during promotion. Run promotion again."
+              exit 1
+            }
+
+            if git merge-base --is-ancestor "$current" "$TARGET_SHA"; then
+              gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$RELEASE_BRANCH" -f sha="$TARGET_SHA" -F force=false >/dev/null
+            else
+              changed="$(git diff --name-status "$current" "$TARGET_SHA" -- supabase/migrations)"
+              if printf '%s\n' "$changed" | awk 'NF && $NF ~ /[.]sql$/ && $1 != "A" {bad=1; print "Immutable Base migration changed or deleted: " $0} END {exit !bad}'; then
+                echo "::error::Cannot automatically reconcile because Base migration history is not a byte-identical subset of validated main."
+                exit 1
+              fi
+
+              git config user.name "OrbitFS Release Promotion"
+              git config user.email "actions@users.noreply.github.com"
+              target_tree="$(git rev-parse "$TARGET_SHA^{tree}")"
+              promoted_sha="$(printf 'Reconcile %s ancestry with validated main %s\n' "$RELEASE_BRANCH" "$TARGET_SHA" | git commit-tree "$target_tree" -p "$current" -p "$TARGET_SHA")"
+              git push origin "$promoted_sha:refs/heads/$RELEASE_BRANCH"
+              echo "Preserved divergent $RELEASE_BRANCH history without force-pushing; promoted tree is exactly validated main."
+            fi
           fi
+
           actual="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$RELEASE_BRANCH" --jq '.object.sha')"
-          test "$actual" = "$TARGET_SHA"
+          test "$actual" = "$promoted_sha"
           git fetch origin "$RELEASE_BRANCH" --prune
-          test "$(git rev-parse 'HEAD:supabase/migrations')" = "$(git rev-parse "origin/$RELEASE_BRANCH:supabase/migrations")" || {
-            echo "::error::Base database migrations differ after promotion."
+          target_tree="$(git rev-parse "$TARGET_SHA^{tree}")"
+          release_tree="$(git rev-parse "origin/$RELEASE_BRANCH^{tree}")"
+          test "$target_tree" = "$release_tree" || {
+            echo "::error::Promoted Base release branch tree differs from validated main."
             exit 1
           }
-          echo "$RELEASE_BRANCH now points to validated main $TARGET_SHA with identical database migrations."
+          main_db_tree="$(git rev-parse "$TARGET_SHA:supabase/migrations")"
+          release_db_tree="$(git rev-parse "origin/$RELEASE_BRANCH:supabase/migrations")"
+          test "$main_db_tree" = "$release_db_tree" || {
+            echo "::error::Promoted Base release branch migrations differ from inspected main."
+            exit 1
+          }
+          echo "$RELEASE_BRANCH promoted from validated main $TARGET_SHA at $actual with identical source and database trees."
