@@ -3,10 +3,11 @@ import { requireUser } from '$lib/server/auth';
 import { assertPanelLicensed } from '$lib/server/license';
 import { isSystemAdmin } from '$lib/server/workspaces';
 import { assertAddonLicensed, CLOUD_ADDON_MANIFESTS, ensureCloudAddonRecord, getCloudAddon, presentAddon, saveCloudAddon } from '$lib/server/cloud-addons';
-import { assertSharedEngineHostReady, getSharedEngineHostState } from '$lib/server/engine-host-state';
+import { getSharedEngineHostState } from '$lib/server/engine-host-state';
 import { getEngineAttachContext } from '$lib/server/engine-host';
 import { confirmEngineHostPairing } from '$lib/server/engine-host-remote';
 import { writeAudit } from '$lib/server/audit';
+import { provisionSharedEngineHost } from '$lib/server/vercel-engine-provision';
 
 const fail=(e:any)=>json({error:String(e?.message||'Request failed'),code:String(e?.code||'ADDON_INSTALL_ERROR')},{status:Number(e?.status||500)});
 const isEngineHostAddon=(id:string)=>CLOUD_ADDON_MANIFESTS[id]?.runtimeMode==='engine-host';
@@ -41,61 +42,27 @@ export async function POST({params,cookies}:any){
 			return json({ok:true,addon,host:null});
 		}
 
-		// Inner deployment / Shared Engine is a prerequisite. Installing a plugin
-		// must never create, redeploy or replace the shared host.
-		const host=await assertSharedEngineHostReady();
-
 		const previousMode=String(row.runtime?.engineMode||'');
 		const requestedAt=new Date().toISOString();
 		await saveCloudAddon(row.id,{
-			installed:false,
-			attached:false,
-			configured:false,
-			status:'installing',
-			installed_at:null,
+			installed:false,attached:false,configured:false,status:'installing',installed_at:null,
 			transport_path:row.transport_path??manifest.transportPath??null,
-			runtime:{
-				...(row.runtime||{}),
-				mode:'engine-host',
-				engineMode:id==='mcp'?(previousMode==='stopped'?'stopped':'running'):(previousMode||defaultEngineMode(id)),
-				setupState:row.runtime?.setupState||'not_started',
-				pendingInstall:true,
-				desiredInstalled:true,
-				installState:'pairing',
-				installRequestedAt:requestedAt,
-				installRequestedByUserId:String(user.id),
-				autoAttachPending:true,
-				lastManualDetachAt:null,
-				compute:'vercel',
-				database:'shared-panel',
-				online:false
-			}
+			runtime:{...(row.runtime||{}),mode:'engine-host',engineMode:id==='mcp'?(previousMode==='stopped'?'stopped':'running'):(previousMode||defaultEngineMode(id)),setupState:row.runtime?.setupState||'not_started',pendingInstall:true,desiredInstalled:true,installState:'provisioning',installRequestedAt:requestedAt,installRequestedByUserId:String(user.id),autoAttachPending:true,lastManualDetachAt:null,compute:'vercel',database:'shared-panel',online:false}
 		});
 		pendingStarted=true;
 
-		// The Engine shares the customer database. The signed pending-install row
-		// above is therefore visible to the Engine before pairing and is the only
-		// temporary state accepted by pairEngineHost().
-		const attach=await getEngineAttachContext(id,String(user.id));
-		const remote=await confirmEngineHostPairing({
-			engineId:id,
-			installationId:attach.installationId,
-			panelUrl:attach.panelUrl,
-			workspaceId:attach.workspaceId,
-			actorUserId:String(user.id)
-		});
-
-		const paired=await getCloudAddon(id);
-		const pairedRuntime=paired.runtime&&typeof paired.runtime==='object'?paired.runtime:{};
-		const addon=await saveCloudAddon(id,{
-			installed:true,
-			attached:true,
-			status:'attached',
-			installed_at:paired.installed_at||new Date().toISOString(),
-			runtime:{...pairedRuntime,pendingInstall:false,desiredInstalled:true,installState:'installed',autoAttachPending:false,lastAttachAt:new Date().toISOString(),installError:null,installErrorCode:null}
-		});
-		await writeAudit({actorUserId:user.id,action:'addon.install.complete',targetType:'addon',targetId:id,detail:{engineHost:true,hostUrl:host.hostUrl,remoteConfirmed:true}});
-		return json({ok:true,waiting:false,addon:await presentAddon(addon),host,engineHost:remote});
+		const provisioned:any=await provisionSharedEngineHost({components:[id],actorUserId:user.id,actorUsername:user.username});
+		if(provisioned?.noOp===true){
+			const attach=await getEngineAttachContext(id,String(user.id));
+			const remote=await confirmEngineHostPairing({engineId:id,installationId:attach.installationId,panelUrl:attach.panelUrl,workspaceId:attach.workspaceId,actorUserId:String(user.id)});
+			const paired=await getCloudAddon(id),pairedRuntime=paired.runtime&&typeof paired.runtime==='object'?paired.runtime:{};
+			const addon=await saveCloudAddon(id,{installed:true,attached:true,status:'attached',installed_at:paired.installed_at||requestedAt,runtime:{...pairedRuntime,pendingInstall:false,desiredInstalled:true,installState:'installed',autoAttachPending:false,lastAttachAt:new Date().toISOString(),installError:null,installErrorCode:null}});
+			await writeAudit({actorUserId:user.id,action:'addon.install.complete',targetType:'addon',targetId:id,detail:{engineHost:true,remoteConfirmed:true,engineDeploymentNoOp:true}});
+			return json({ok:true,waiting:false,addon:await presentAddon(addon),host:await getSharedEngineHostState(),engineHost:remote});
+		}
+		const host=await getSharedEngineHostState();
+		await writeAudit({actorUserId:user.id,action:'addon.install.started',targetType:'addon',targetId:id,detail:{engineHost:true,hostState:host.state}}).catch(()=>undefined);
+		return json({ok:true,waiting:true,phase:'provisioning',addon:await presentAddon(await getCloudAddon(id)),host},{status:202});
 	}catch(e:any){
 		if(id&&pendingStarted){
 			try{

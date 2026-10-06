@@ -19,6 +19,9 @@ export type SharedEngineHostState = {
 	installationRoute: 'billing_store' | 'standard';
 	panelUrl: string | null;
 	hostUrl: string | null;
+	domainMode: 'generated' | 'vercel' | 'custom';
+	domainName: string | null;
+	domainVerified: boolean;
 	projectId: string | null;
 	projectName: string | null;
 	deploymentId: string | null;
@@ -78,6 +81,19 @@ export function normalizePublicHttpsUrl(value: unknown, label = 'URL') {
 	}
 }
 
+export function normalizeDomainHost(value: unknown, label = 'Domain') {
+	const raw=String(value||'').trim().toLowerCase();
+	try {
+		const parsed=new URL(raw.includes('://')?raw:`https://${raw}`);
+		const host=parsed.hostname.toLowerCase().replace(/\.$/,'');
+		if(parsed.protocol!=='https:'||parsed.username||parsed.password||parsed.port||parsed.pathname!=='/'||parsed.search||parsed.hash)throw new Error();
+		if(!host.includes('.')||host.length>253||!/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host))throw new Error();
+		return host;
+	} catch {
+		throw Object.assign(new Error(`${label} must be a public hostname such as engine.example.com`),{status:400,code:'PUBLIC_DOMAIN_REQUIRED'});
+	}
+}
+
 export function configuredEngineHostUrl() {
 	const explicit = String(env.ORBITFS_ENGINE_HOST_URL || '').trim();
 	if (explicit) return normalizePublicHttpsUrl(explicit, 'Engine Host URL');
@@ -103,6 +119,9 @@ function baseState(installationId: string): SharedEngineHostState {
 		installationRoute: 'standard',
 		panelUrl: configuredPanelUrl(),
 		hostUrl: configured,
+		domainMode: 'generated',
+		domainName: null,
+		domainVerified: true,
 		projectId: null,
 		projectName: null,
 		deploymentId: null,
@@ -170,7 +189,10 @@ async function computeSharedEngineHostState(): Promise<SharedEngineHostState> {
 		installationRoute: String(stored.installationRoute || 'standard') === 'billing_store' ? 'billing_store' : 'standard',
 		state,
 		panelUrl: stored.panelUrl ? normalizePublicHttpsUrl(stored.panelUrl, 'Panel URL') : fallback.panelUrl,
-		hostUrl: stored.hostUrl ? normalizePublicHttpsUrl(stored.hostUrl, 'Engine Host URL') : fallback.hostUrl
+		hostUrl: stored.hostUrl ? normalizePublicHttpsUrl(stored.hostUrl, 'Engine Host URL') : fallback.hostUrl,
+		domainMode: stored.domainMode==='custom' ? 'custom' : stored.domainMode==='vercel' ? 'vercel' : 'generated',
+		domainName: stored.domainName ? normalizeDomainHost(stored.domainName, stored.domainMode==='vercel'?'Engine Vercel address':'Engine custom domain') : null,
+		domainVerified: stored.domainMode==='custom' ? stored.domainVerified===true : true
 	};
 }
 
@@ -203,6 +225,11 @@ export async function saveSharedEngineHostState(patch: Partial<SharedEngineHostS
 		hostUrl: Object.prototype.hasOwnProperty.call(patch,'hostUrl')
 			? (patch.hostUrl ? normalizePublicHttpsUrl(patch.hostUrl, 'Engine Host URL') : null)
 			: current.hostUrl,
+		domainMode: patch.domainMode==='custom' ? 'custom' : patch.domainMode==='vercel' ? 'vercel' : patch.domainMode==='generated' ? 'generated' : current.domainMode,
+		domainName: Object.prototype.hasOwnProperty.call(patch,'domainName')
+			? (patch.domainName ? normalizeDomainHost(patch.domainName, patch.domainMode==='vercel'?'Engine Vercel address':'Engine custom domain') : null)
+			: current.domainName,
+		domainVerified: Object.prototype.hasOwnProperty.call(patch,'domainVerified') ? patch.domainVerified===true : current.domainVerified,
 		createdAt: current.createdAt || stamp,
 		updatedAt: stamp
 	};

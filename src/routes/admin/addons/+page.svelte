@@ -16,6 +16,7 @@
 		lastError:string|null; releaseVersion?:string|null; releaseId?:string|null; releaseChannel?:string|null;
 		updaterConnected?:boolean; updaterProvider?:string|null; updaterProtocol?:number|null;
 		updaterLastVerifiedAt?:string|null; updaterLastError?:string|null;
+		domainMode?:'generated'|'vercel'|'custom'; domainName?:string|null; domainVerified?:boolean;
 	};
 	type HostResponse = { host:Host; provisioningAvailable:boolean; provisioningMissing?:string[]; waiting?:boolean };
 	type EngineUpdatePlan = {
@@ -41,6 +42,10 @@
 	let vercelTeamId=$state('');
 	let connectingVercel=$state(false);
 	let enginePlan=$state<EnginePlanResponse|null>(null);
+	let showEngineDomain=$state(false);
+	let engineDomainMode=$state<'generated'|'vercel'|'custom'>('generated');
+	let engineDomain=$state('');
+	let engineDomainAvailability=$state<{domain:string;available:boolean;attached?:boolean;reserved?:boolean;reason?:string|null}|null>(null);
 
 	const message=(e:unknown,fallback:string)=>e instanceof ApiError?`${e.message}${e.code?` (${e.code})`:''}`:fallback;
 	const hostReady=()=>['linked','ready'].includes(String(host?.state||''));
@@ -114,6 +119,61 @@
 			if(!deployed)throw new Error(error||'Engine deployment failed');
 		}catch(e){ if(!error)error=message(e,'Could not connect Vercel or deploy the Engine'); }
 		finally{ connectingVercel=false; }
+	}
+
+	function toggleEngineDomain(){
+		showEngineDomain=!showEngineDomain;
+		if(!showEngineDomain)return;
+		engineDomainMode=host?.domainMode==='custom'?'custom':host?.domainMode==='vercel'?'vercel':'generated';
+		engineDomain=host?.domainName||'';
+		engineDomainAvailability=engineDomainMode==='vercel'&&engineDomain?{domain:engineDomain,available:true,attached:true,reserved:true}:null;
+	}
+
+	async function refreshEngineDomain(){
+		if(!host?.projectId)return;
+		busy='host:domain'; error='';
+		try{
+			const data=await api.get<HostResponse>('/engine-host');
+			host=data.host;
+			provisioningAvailable=data.provisioningAvailable;
+			provisioningMissing=data.provisioningMissing||[];
+			if(host?.domainMode==='vercel'&&host.domainName)engineDomainAvailability={domain:host.domainName,available:true,attached:true,reserved:true};
+		}catch(e){ error=message(e,'Could not refresh Engine domain status'); }
+		finally{ busy=''; }
+	}
+
+	async function checkEngineDomainAvailability(){
+		if(!engineDomain.trim())return null;
+		busy='host:domain-check'; error='';
+		try{
+			const data=await api.post<any>('/engine-host/domain-check',{domain:engineDomain});
+			if(data.host)host=data.host;
+			engineDomainAvailability=data.availability||null;
+			if(data.availability?.domain)engineDomain=data.availability.domain;
+			return data.availability||null;
+		}catch(e){
+			engineDomainAvailability=null;
+			error=message(e,'Could not check the Engine Vercel address');
+			return null;
+		}finally{ busy=''; }
+	}
+
+	async function saveEngineDomain(){
+		if(!host?.projectId)return;
+		if(engineDomainMode==='vercel'){
+			const availability=await checkEngineDomainAvailability();
+			if(!availability?.available)return;
+		}
+		busy='host:domain'; error='';
+		try{
+			const data=await api.post<any>('/engine-host/domain',{mode:engineDomainMode,domain:engineDomainMode==='generated'?null:engineDomain});
+			host=data.host;
+			engineDomainMode=host?.domainMode==='custom'?'custom':host?.domainMode==='vercel'?'vercel':'generated';
+			engineDomain=host?.domainName||'';
+			engineDomainAvailability=engineDomainMode==='vercel'&&engineDomain?{domain:engineDomain,available:true,attached:true,reserved:true}:null;
+			showEngineDomain=false;
+		}catch(e){ error=message(e,'Could not update the Engine address'); }
+		finally{ busy=''; }
 	}
 
 	async function hostAct(action:string,body:Record<string,unknown>={}){
@@ -234,6 +294,62 @@
 					<div class="rounded-lg border p-3"><span class="text-xs text-muted-foreground">Panel link</span><p class="mt-1 font-medium">{hostReady()?'Linked':polling?'Linking…':'Not linked'}</p></div>
 					<div class="rounded-lg border p-3"><span class="text-xs text-muted-foreground">Updater</span><p class="mt-1 font-medium">{host?.updaterConnected?'Connected':host?.hostUrl?'Needs connection':'Not deployed'}</p>{#if host?.releaseVersion}<p class="mt-1 text-xs text-muted-foreground">{host.releaseVersion} · {host.releaseChannel||'stable'}</p>{/if}</div>
 				</div>
+				{#if host?.projectId}
+					<div class="rounded-lg border bg-muted/15 p-3">
+						<div class="flex flex-wrap items-start justify-between gap-3">
+							<div class="min-w-0">
+								<p class="text-xs font-semibold uppercase tracking-[.12em] text-primary">Domain &amp; address</p>
+								<p class="mt-1 break-all text-sm font-medium">{host.hostUrl||'No Engine address detected'}</p>
+								{#if host.hostUrl}<p class="mt-1 break-all text-xs"><span class="text-muted-foreground">MCP connector:</span> <a class="font-medium underline underline-offset-2" href={`${host.hostUrl}/mcp`} target="_blank" rel="noreferrer">{host.hostUrl}/mcp</a></p>{/if}
+								{#if host.projectName&&host.hostUrl!==`https://${host.projectName}.vercel.app`}<p class="mt-1 break-all text-xs text-muted-foreground">Original MCP address remains available: https://{host.projectName}.vercel.app/mcp</p>{/if}
+								<p class="mt-1 text-xs text-muted-foreground">{host.domainMode==='custom'?(host.domainVerified?'Custom domain verified and active.':'Custom domain attached; Vercel DNS verification is still required.'):host.domainMode==='vercel'?`Using reserved Vercel address ${host.domainName||host.hostUrl}.`:'Using the stable generated Vercel domain.'}</p>
+							</div>
+							<div class="flex flex-wrap gap-2">
+								<Button variant="outline" size="sm" onclick={refreshEngineDomain} disabled={busy!==''}>{busy==='host:domain'?'Checking…':'Refresh domain'}</Button>
+								<Button variant="outline" size="sm" onclick={toggleEngineDomain} disabled={busy!==''}>{showEngineDomain?'Close':'Configure'}</Button>
+							</div>
+						</div>
+						{#if showEngineDomain}
+							<div class="mt-3 grid gap-3 border-t pt-3 md:grid-cols-[220px_minmax(0,1fr)_auto] md:items-end">
+								<label class="grid gap-1.5 text-sm">
+									<span class="font-medium">Address type</span>
+									<select class="h-9 rounded-md border border-input bg-background px-3 text-sm" bind:value={engineDomainMode} onchange={()=>engineDomainAvailability=null} disabled={busy!==''}>
+										<option value="generated">Default generated Vercel domain</option>
+										<option value="vercel">Custom Vercel address</option>
+										<option value="custom">Custom domain</option>
+									</select>
+								</label>
+								{#if engineDomainMode==='vercel'}
+									<label class="grid gap-1.5 text-sm">
+										<span class="font-medium">Custom Vercel address</span>
+										<Input bind:value={engineDomain} oninput={()=>engineDomainAvailability=null} placeholder="my-orbitfs-engine.vercel.app" autocomplete="off"/>
+										<span class="text-xs text-muted-foreground">Check availability first. Nothing is claimed until you save the address.</span>
+									</label>
+								{:else if engineDomainMode==='custom'}
+									<label class="grid gap-1.5 text-sm">
+										<span class="font-medium">Custom Engine domain</span>
+										<Input bind:value={engineDomain} placeholder="engine.example.com" autocomplete="off"/>
+									</label>
+								{:else}
+									<div class="rounded-md border bg-background/60 px-3 py-2 text-sm">
+										<span class="text-xs text-muted-foreground">Generated address</span>
+										<p class="mt-1 break-all font-medium">https://{host.projectName}.vercel.app</p>
+									</div>
+								{/if}
+								<div class="flex flex-wrap gap-2">
+									{#if engineDomainMode==='vercel'}<Button variant="outline" onclick={checkEngineDomainAvailability} disabled={busy!==''||!engineDomain.trim()}>{busy==='host:domain-check'?'Checking…':'Check availability'}</Button>{/if}
+									<Button onclick={saveEngineDomain} disabled={busy!==''||(engineDomainMode!=='generated'&&!engineDomain.trim())}>{busy==='host:domain'?'Saving…':'Save address'}</Button>
+								</div>
+							</div>
+							{#if engineDomainMode==='vercel'&&engineDomainAvailability}
+							<p class={engineDomainAvailability.available?'mt-2 text-xs text-emerald-500':'mt-2 text-xs text-destructive'}>
+								<strong>{engineDomainAvailability.available?'Available':'Unavailable'}:</strong> {engineDomainAvailability.domain}{engineDomainAvailability.available?(engineDomainAvailability.attached?' is already attached to this Engine project.':' is available and will only be claimed when you save.'):' is already in use on Vercel.'}
+							</p>
+						{/if}
+						<p class="mt-2 text-xs text-muted-foreground">This changes the address on the existing Shared Engine Vercel project. It does not create a second Engine deployment.</p>
+						{/if}
+					</div>
+				{/if}
 				{#if host?.lastError}<div class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{host.lastError}</div>{/if}
 				{#if host?.updaterLastError}<div class="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm"><strong>Updater connection:</strong> {host.updaterLastError} <Button variant="ghost" size="sm" onclick={()=>hostAct('refresh')} disabled={busy!==''||polling}>Retry connection</Button></div>{/if}
 				{#if host?.state==='not_deployed' && provisioningMissing.length && !provisioningMissing.includes('Vercel connection')}

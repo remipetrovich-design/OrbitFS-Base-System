@@ -6,7 +6,7 @@ import { isSystemAdmin } from '$lib/server/workspaces';
 import { writeAudit } from '$lib/server/audit';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 import { getSharedEngineHostState, saveSharedEngineHostState } from '$lib/server/engine-host-state';
-import { ENGINE_DEPLOYER_PROTOCOL, fetchEngineBootstrapRelease, assertInitialEngineRelease, inspectInstalledEngineDatabase, engineHostProvisioningStatus, provisionSharedEngineHost, refreshSharedEngineDeployment, registerSharedEngineUpdater, deleteRegisteredSharedEngineProject, scopeEngineReleaseForInstalledLicenses } from '$lib/server/vercel-engine-provision';
+import { ENGINE_DEPLOYER_PROTOCOL, fetchEngineBootstrapRelease, assertInitialEngineRelease, inspectInstalledEngineDatabase, engineHostProvisioningStatus, provisionSharedEngineHost, refreshSharedEngineDeployment, registerSharedEngineUpdater, deleteRegisteredSharedEngineProject, scopeEngineReleaseForInstalledLicenses, configureSharedEngineDomain, checkSharedEngineVercelDomainAvailability } from '$lib/server/vercel-engine-provision';
 import { confirmSharedEngineHostLink, confirmSharedEngineHostUnlink, readSharedEngineHostLink } from '$lib/server/engine-host-remote';
 import { getVercelConnectionSummary } from '$lib/server/vercel-connection';
 import { fetchAuthorizedEngineBranch } from '$lib/server/engine-branch-client';
@@ -47,7 +47,7 @@ async function assertNoAttachedEngines() {
 async function autoAttachInstalledEngineAddons(user:any) {
 	const db=getSupabaseAdmin();
 	const engineIds=Object.keys(CLOUD_ADDON_MANIFESTS).filter((id)=>CLOUD_ADDON_MANIFESTS[id]?.runtimeMode==='engine-host');
-	const result=await db.from('orbitfs_addons').select('id,name,installed,attached,available,license_component,status,runtime').in('id',engineIds);
+	const result=await db.from('orbitfs_addons').select('id,name,installed,attached,configured,available,license_component,status,runtime').in('id',engineIds);
 	if(result.error)throw result.error;
 	const attached:any[]=[];
 	for(const row of result.data||[]){
@@ -58,6 +58,19 @@ async function autoAttachInstalledEngineAddons(user:any) {
 		const pendingInstall=runtime.pendingInstall===true;
 
 		if((row as any).attached===true){
+			const setupComplete=(row as any).configured===true&&String(runtime.setupState||'')==='complete';
+			if(id==='mcp'&&!setupComplete){
+				const component=String((row as any).license_component||manifest.licenseComponent||'').trim();
+				await assertAddonLicensed(component||null,false);
+				const attach=await getEngineAttachContext(id,String(user.id));
+				const remote=await confirmEngineHostPairing({engineId:id,installationId:attach.installationId,panelUrl:attach.panelUrl,workspaceId:attach.workspaceId,actorUserId:String(user.id)});
+				const current=await getCloudAddon(id);
+				const currentRuntime=current.runtime&&typeof current.runtime==='object'?current.runtime:{};
+				await saveCloudAddon(id,{runtime:{...currentRuntime,pendingInstall:false,desiredInstalled:true,installState:'installed',autoAttachPending:false,lastAutoAttachAt:new Date().toISOString(),lastManualDetachAt:null}});
+				await writeAudit({actorUserId:user.id,action:'engine.auto_setup_repair',targetType:'addon',targetId:id,detail:{engineHost:true,workspaceId:attach.workspaceId,licenseComponent:component,remoteConfirmed:true}});
+				attached.push({id,component,workspaceId:attach.workspaceId,remote,repairedSetup:true});
+				continue;
+			}
 			if(runtime.autoAttachPending===true||pendingInstall){
 				await saveCloudAddon(id,{runtime:{...runtime,pendingInstall:false,desiredInstalled:true,autoAttachPending:false,lastAutoAttachAt:new Date().toISOString()}});
 			}
@@ -229,6 +242,23 @@ export async function POST({params,request,cookies}:any) {
 			const advanced=await advanceProvisionedHost(user,body);
 			return json({ok:true,...advanced,...await statusPayload()});
 		}
+		if(action==='domain-check') {
+			const availability=await checkSharedEngineVercelDomainAvailability(body);
+			await writeAudit({actorUserId:user.id,action:'engine_host.domain_check',targetType:'engine_host',targetId:String((await getSharedEngineHostState()).projectId||''),detail:{domain:availability.domain,available:availability.available,reserved:availability.reserved}});
+			return json({ok:true,availability,...await statusPayload()});
+		}
+		if(action==='domain') {
+			const result=await configureSharedEngineDomain(body);
+			await writeAudit({
+				actorUserId:user.id,
+				action:'engine_host.domain_update',
+				targetType:'engine_host',
+				targetId:String(result.host.projectId||result.host.installationId),
+				detail:{mode:result.domain.mode,vercelDomain:result.domain.vercelDomain||null,customDomain:result.domain.customDomain||null,verified:result.domain.verified,effectiveUrl:result.domain.effectiveUrl}
+			});
+			return json({ok:true,domain:result.domain,...await statusPayload({host:result.host})});
+		}
+
 		if(action==='register'||action==='sync-updater') {
 			body.actorUserId=user.id;
 			body.actorUsername=user.username;

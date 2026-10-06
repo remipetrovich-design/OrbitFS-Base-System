@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { env } from '$env/dynamic/private';
-import { configuredPanelUrl, getSharedEngineHostState, saveSharedEngineHostState } from '$lib/server/engine-host-state';
+import { configuredPanelUrl, getSharedEngineHostState, normalizeDomainHost, saveSharedEngineHostState } from '$lib/server/engine-host-state';
 import { fetchLatestEngineRelease, verifyEngineUpdaterRelease } from '$lib/server/engine-release-client';
 import { fetchAuthorizedEngineBranch, verifyAuthorizedEngineBranch } from '$lib/server/engine-branch-client';
 import { getVercelCredentials } from '$lib/server/vercel-connection';
@@ -251,6 +251,156 @@ export async function deleteRegisteredSharedEngineProject(expectedProjectId: str
 		if(Number(error?.status)!==404)throw error;
 	}
 	return{projectId,projectName:registeredName,alreadyAbsent:false};
+}
+
+async function sharedEngineProjectDomains(projectId:string,token:string,teamId:string){
+	const result=await vercelRequest(`/v9/projects/${encodeURIComponent(projectId)}/domains`,token,teamId);
+	return Array.isArray(result?.domains)?result.domains:[];
+}
+
+function normalizeEngineVercelAlias(value:unknown){
+	const raw=String(value||'').trim().toLowerCase().replace(/^https?:\/\//,'').replace(/\/$/,'');
+	const candidate=raw.endsWith('.vercel.app')?raw:`${raw}.vercel.app`;
+	const domain=normalizeDomainHost(candidate,'Engine Vercel address');
+	const slug=domain.slice(0,-'.vercel.app'.length);
+	if(!domain.endsWith('.vercel.app')||!slug||slug.includes('.')||slug.length>63||!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug)){
+		throw fail('Enter a valid Vercel address such as my-orbitfs-engine.vercel.app.',400,'ENGINE_VERCEL_ALIAS_INVALID');
+	}
+	return domain;
+}
+
+function vercelAliasUnavailable(error:any){
+	const message=String(error?.message||'').toLowerCase();
+	return /alias.*(already|in use)|already.*(used|assigned|exists)|domain.*(in use|assigned)|alias_in_use|forbidden.*alias/.test(message);
+}
+
+async function ensureSelectedEngineVercelAliasOnDeployment(state:any,deploymentId:string,token:string,teamId:string){
+	if(String(state?.domainMode||'')!=='vercel'||!state?.domainName)return;
+	const domain=normalizeEngineVercelAlias(state.domainName);
+	const projectId=String(state.projectId||'').trim();
+	if(!projectId)throw fail('Engine project identity is missing while restoring its Vercel address.',409,'ENGINE_DOMAIN_PROJECT_REQUIRED');
+	let current:any=null;
+	try{current=await vercelRequest(`/v4/aliases/${encodeURIComponent(domain)}`,token,teamId);}catch(error:any){if(Number(error?.status||0)!==404)throw error;}
+	const currentDeploymentId=String(current?.deploymentId||current?.deployment?.id||'').trim();
+	const currentProjectId=String(current?.projectId||current?.project?.id||current?.deployment?.projectId||'').trim();
+	if(currentDeploymentId===deploymentId&&(!currentProjectId||currentProjectId===projectId))return;
+	try{
+		// Vercel atomically moves an existing alias from the previous deployment
+		// when it is assigned to a new deployment owned by the same account/team.
+		await vercelRequest(`/v2/deployments/${encodeURIComponent(deploymentId)}/aliases`,token,teamId,{method:'POST',body:JSON.stringify({alias:domain,redirect:null})});
+	}catch(error:any){
+		if(vercelAliasUnavailable(error))throw fail(`${domain} could not be moved to the new Engine deployment.`,409,'ENGINE_VERCEL_ALIAS_REBIND_FAILED');
+		throw error;
+	}
+	const verified=await vercelRequest(`/v4/aliases/${encodeURIComponent(domain)}`,token,teamId);
+	const verifiedDeploymentId=String(verified?.deploymentId||verified?.deployment?.id||'').trim();
+	const verifiedProjectId=String(verified?.projectId||verified?.project?.id||verified?.deployment?.projectId||'').trim();
+	if(verifiedDeploymentId!==deploymentId||(verifiedProjectId&&verifiedProjectId!==projectId)){
+		throw fail('Vercel did not bind the selected Engine address to the new production deployment.',503,'ENGINE_VERCEL_ALIAS_REBIND_FAILED');
+	}
+}
+
+export async function checkSharedEngineVercelDomainAvailability(input:Record<string,any>={}){
+	const current=await getSharedEngineHostState(true);
+	const projectId=String(current.projectId||'').trim();
+	const projectName=String(current.projectName||'').trim();
+	if(!projectId||!projectName)throw fail('Deploy the Shared Engine before configuring its domain.',409,'ENGINE_HOST_NOT_DEPLOYED');
+	const {token,teamId}=await credentialsFrom(input);
+	if(!token)throw fail('Connect the owning Vercel account before checking an Engine address.',409,'VERCEL_TOKEN_REQUIRED');
+	const domain=normalizeEngineVercelAlias(input.domain);
+	const generatedDomain=`${projectName.toLowerCase()}.vercel.app`;
+	if(domain===generatedDomain)return {domain,available:true,attached:true,reserved:true,current:true};
+	try{
+		const alias=await vercelRequest(`/v4/aliases/${encodeURIComponent(domain)}`,token,teamId);
+		const aliasProjectId=String(alias?.projectId||alias?.project?.id||alias?.deployment?.projectId||'').trim();
+		const aliasDeploymentId=String(alias?.deploymentId||alias?.deployment?.id||'').trim();
+		if(aliasProjectId&&aliasProjectId===projectId){
+			const currentAlias=Boolean(current.deploymentId&&aliasDeploymentId===String(current.deploymentId));
+			return {domain,available:true,attached:currentAlias,reserved:true,current:currentAlias};
+		}
+		return {domain,available:false,attached:false,reserved:false,current:false,reason:'already_in_use'};
+	}catch(error:any){
+		const status=Number(error?.status||0);
+		if(status===404)return {domain,available:true,attached:false,reserved:false,current:false};
+		if(status===403||vercelAliasUnavailable(error))return {domain,available:false,attached:false,reserved:false,current:false,reason:'already_in_use'};
+		throw error;
+	}
+}
+
+export async function configureSharedEngineDomain(input:Record<string,any>={}){
+	const current=await getSharedEngineHostState(true);
+	const projectId=String(current.projectId||'').trim();
+	const projectName=String(current.projectName||'').trim();
+	if(!projectId||!projectName)throw fail('Deploy the Shared Engine before configuring its domain.',409,'ENGINE_HOST_NOT_DEPLOYED');
+	const {token,teamId}=await credentialsFrom(input);
+	if(!token)throw fail('Connect the owning Vercel account before configuring the Shared Engine domain.',409,'VERCEL_TOKEN_REQUIRED');
+	const mode=String(input.mode||'generated').trim().toLowerCase();
+	if(mode!=='generated'&&mode!=='vercel'&&mode!=='custom')throw fail('Unsupported Engine domain mode.',400,'ENGINE_DOMAIN_MODE_INVALID');
+	const generatedDomain=`${projectName.toLowerCase()}.vercel.app`;
+	if(mode==='generated'){
+		const host=await saveSharedEngineHostState({
+			domainMode:'generated',domainName:null,domainVerified:true,
+			hostUrl:`https://${generatedDomain}`,lastSyncAt:new Date().toISOString(),lastError:null
+		},current);
+		await recordLicenseManagerCheckIn({
+			action:'check_in',phase:'completed',product:'orbitfs_base',
+			productVersion:String(env.ORBITFS_APP_VERSION||'').trim()||null,
+			releaseId:current.releaseId,deploymentId:current.deploymentId,deploymentUrl:host.hostUrl,
+			projectId,projectName,
+			details:{deploymentProduct:'orbitfs_engine',engineHostUrl:host.hostUrl,mcpUrl:host.hostUrl?`${host.hostUrl}/mcp`:null,domainMode:'generated',domainName:null,domainVerified:true}
+		});
+		return {host,domain:{mode:'generated',generatedDomain,vercelDomain:null,customDomain:null,verified:true,effectiveUrl:host.hostUrl,mcpUrl:host.hostUrl?`${host.hostUrl}/mcp`:null}};
+	}
+	if(mode==='vercel'){
+		const availability=await checkSharedEngineVercelDomainAvailability({...input,vercelToken:token,teamId});
+		if(!availability.available)throw fail(`${availability.domain} is already in use on Vercel.`,409,'ENGINE_VERCEL_ALIAS_UNAVAILABLE');
+		const domain=availability.domain;
+		const deploymentId=String(current.deploymentId||current.pendingDeploymentId||'').trim();
+		if(!deploymentId)throw fail('Engine deployment is not ready for a custom Vercel address.',409,'ENGINE_DEPLOYMENT_REQUIRED');
+		if(!availability.attached){
+			try{
+				await vercelRequest(`/v2/deployments/${encodeURIComponent(deploymentId)}/aliases`,token,teamId,{method:'POST',body:JSON.stringify({alias:domain,redirect:null})});
+			}catch(error:any){
+				if(Number(error?.status||0)===403||Number(error?.status||0)===409||vercelAliasUnavailable(error)){
+					throw fail(`${domain} is already in use on Vercel.`,409,'ENGINE_VERCEL_ALIAS_UNAVAILABLE');
+				}
+				throw error;
+			}
+		}
+		const host=await saveSharedEngineHostState({
+			domainMode:'vercel',domainName:domain,domainVerified:true,
+			hostUrl:`https://${domain}`,lastSyncAt:new Date().toISOString(),lastError:null
+		},current);
+		await recordLicenseManagerCheckIn({
+			action:'check_in',phase:'completed',product:'orbitfs_base',
+			productVersion:String(env.ORBITFS_APP_VERSION||'').trim()||null,
+			releaseId:current.releaseId,deploymentId:current.deploymentId,deploymentUrl:host.hostUrl,
+			projectId,projectName,
+			details:{deploymentProduct:'orbitfs_engine',engineHostUrl:host.hostUrl,mcpUrl:host.hostUrl?`${host.hostUrl}/mcp`:null,domainMode:'vercel',domainName:domain,domainVerified:true}
+		});
+		return {host,domain:{mode:'vercel',generatedDomain,vercelDomain:domain,customDomain:null,verified:true,effectiveUrl:host.hostUrl,mcpUrl:host.hostUrl?`${host.hostUrl}/mcp`:null}};
+	}
+	const domain=normalizeDomainHost(input.domain,'Engine custom domain');
+	if(domain.endsWith('.vercel.app'))throw fail('Choose Custom Vercel address for vercel.app names.',400,'ENGINE_CUSTOM_DOMAIN_REQUIRED');
+	let domains=await sharedEngineProjectDomains(projectId,token,teamId);
+	let entry=domains.find((item:any)=>String(item?.name||'').trim().toLowerCase()===domain);
+	if(!entry){
+		entry=await vercelRequest(`/v10/projects/${encodeURIComponent(projectId)}/domains`,token,teamId,{method:'POST',body:JSON.stringify({name:domain})});
+	}
+	const verified=entry?.verified===true&&entry?.misconfigured!==true;
+	const host=await saveSharedEngineHostState({
+		domainMode:'custom',domainName:domain,domainVerified:verified,
+		hostUrl:verified?`https://${domain}`:`https://${generatedDomain}`,
+		lastSyncAt:new Date().toISOString(),lastError:verified?null:'Custom Engine domain is waiting for Vercel DNS verification.'
+	},current);
+	await recordLicenseManagerCheckIn({
+		action:'check_in',phase:'completed',product:'orbitfs_base',
+		productVersion:String(env.ORBITFS_APP_VERSION||'').trim()||null,
+		releaseId:current.releaseId,deploymentId:current.deploymentId,deploymentUrl:host.hostUrl,
+		projectId,projectName,
+		details:{deploymentProduct:'orbitfs_engine',engineHostUrl:host.hostUrl,mcpUrl:host.hostUrl?`${host.hostUrl}/mcp`:null,domainMode:'custom',domainName:domain,domainVerified:verified}
+	});
+	return {host,domain:{mode:'custom',generatedDomain,vercelDomain:null,customDomain:domain,verified,effectiveUrl:host.hostUrl,mcpUrl:host.hostUrl?`${host.hostUrl}/mcp`:null}};
 }
 
 type PreparedDatabaseCredential={
@@ -1143,7 +1293,8 @@ export async function refreshSharedEngineDeployment(input: Record<string, any> =
 	const readyState = deploymentReadyState(deployment);
 	const candidateDeploymentUrl = publicVercelUrl(deployment?.url) || current.pendingDeploymentUrl || current.deploymentUrl;
 	const stableProjectUrl = current.projectName ? publicVercelUrl(`${current.projectName}.vercel.app`) : null;
-	const candidateHostUrl = stableProjectUrl || publicVercelUrl(deployment?.alias?.[0]) || candidateDeploymentUrl || current.hostUrl;
+	const preferredDomainUrl=current.domainMode!=='generated'&&current.domainVerified&&current.domainName?publicVercelUrl(current.domainName):null;
+	const candidateHostUrl = preferredDomainUrl || stableProjectUrl || publicVercelUrl(deployment?.alias?.[0]) || candidateDeploymentUrl || current.hostUrl;
 
 	const targetReleaseId = pending ? current.pendingReleaseId : current.releaseId;
 	const targetVersion = pending ? current.pendingReleaseVersion : current.releaseVersion;
@@ -1183,6 +1334,7 @@ export async function refreshSharedEngineDeployment(input: Record<string, any> =
 	}
 
 	const ready = readyState === 'READY';
+	if (ready) await ensureSelectedEngineVercelAliasOnDeployment(current,deploymentId,token,teamId);
 	if (!ready) {
 		const host = await saveSharedEngineHostState({
 			state:'provisioning',
@@ -1540,6 +1692,7 @@ export async function provisionSharedEngineHost(input: Record<string, any> = {})
 			lastError: null, lastSyncAt: new Date().toISOString()
 		});
 		if (readyState === 'READY') {
+			await ensureSelectedEngineVercelAliasOnDeployment(current,String(deployment?.id||''),token,teamId);
 			const finalized=await finalizeReadyEngineRelease(savedHost,{
 				version:descriptor.version,
 				releaseId:descriptor.releaseId,

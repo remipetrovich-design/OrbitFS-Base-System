@@ -28,15 +28,42 @@ export async function resolveMcpScope(scope = '') {
 	return [...new Set(scopes)].join(' ');
 }
 
-export async function resolveMcpResource() {
+function normalizedMcpResource(value: unknown) {
+	try {
+		const parsed = new URL(String(value || '').trim());
+		if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+		const path = parsed.pathname.replace(/\/+$/, '') || '/';
+		if (path !== '/mcp') return null;
+		return `${parsed.origin}/mcp`;
+	} catch {
+		return null;
+	}
+}
+
+export async function resolveMcpResources() {
 	const host = await getSharedEngineHostState();
-	if (!host.hostUrl) {
+	const resources:string[] = [];
+	if (host.hostUrl) {
+		const current = normalizedMcpResource(`${String(host.hostUrl).replace(/\/$/, '')}/mcp`);
+		if (current) resources.push(current);
+	}
+	const projectName=String(host.projectName||'').trim().toLowerCase();
+	if(projectName){
+		const generated=normalizedMcpResource(`https://${projectName}.vercel.app/mcp`);
+		if(generated)resources.push(generated);
+	}
+	return [...new Set(resources)];
+}
+
+export async function resolveMcpResource() {
+	const resources=await resolveMcpResources();
+	if (!resources.length) {
 		throw Object.assign(new Error('Shared Engine Host is not deployed for this OrbitFS installation'), {
 			status: 503,
 			code: 'ENGINE_HOST_NOT_DEPLOYED'
 		});
 	}
-	return `${String(host.hostUrl).replace(/\/$/, '')}/mcp`;
+	return resources[0];
 }
 
 export async function assertMcpOAuthReady() {
@@ -50,10 +77,11 @@ export async function assertMcpOAuthReady() {
 }
 
 export async function assertResource(resource: string | null | undefined) {
-	const expected = await resolveMcpResource();
-	const supplied = String(resource || expected).replace(/\/$/, '');
-	if (supplied !== expected) throw Object.assign(new Error('Invalid OAuth resource'), { status: 400, code: 'OAUTH_INVALID_RESOURCE' });
-	return expected;
+	const fallback = await resolveMcpResource();
+	const supplied = normalizedMcpResource(resource || fallback);
+	const allowed = await resolveMcpResources();
+	if (!supplied || !allowed.includes(supplied)) throw Object.assign(new Error('Invalid OAuth resource'), { status: 400, code: 'OAUTH_INVALID_RESOURCE' });
+	return supplied;
 }
 
 export async function getOAuthClient(clientId: string) {
@@ -191,7 +219,7 @@ export async function exchangeRefreshToken(input: { refreshToken: string; client
 
 export async function authenticateMcpAccessToken(request: Request) {
 	await assertMcpOAuthReady();
-	const resource = await resolveMcpResource();
+	const allowedResources = await resolveMcpResources();
 	const header = request.headers.get('authorization') || '';
 	const match = /^Bearer\s+(.+)$/i.exec(header);
 	if (!match) throw Object.assign(new Error('MCP bearer token required'), { status: 401, code: 'MCP_AUTH_REQUIRED' });
@@ -200,7 +228,7 @@ export async function authenticateMcpAccessToken(request: Request) {
 	const { data: token, error } = await db.from('mcp_oauth_tokens').select('*').eq('access_token_hash', tokenHash).maybeSingle();
 	if (error) throw error;
 	if (!token || token.revoked_at || new Date(token.expires_at).getTime() <= Date.now()) throw Object.assign(new Error('Invalid or expired MCP access token'), { status: 401, code: 'MCP_TOKEN_INVALID' });
-	if (token.resource !== resource) throw Object.assign(new Error('MCP token resource mismatch'), { status: 401, code: 'MCP_RESOURCE_MISMATCH' });
+	if (!allowedResources.includes(String(token.resource||''))) throw Object.assign(new Error('MCP token resource mismatch'), { status: 401, code: 'MCP_RESOURCE_MISMATCH' });
 	const { data: user, error: userError } = await db.from('orbitfs_users')
 		.select('id,username,display_name,email,role,status,avatar_url,permissions,must_change_pin,ban_reason')
 		.eq('id', token.user_id).maybeSingle();

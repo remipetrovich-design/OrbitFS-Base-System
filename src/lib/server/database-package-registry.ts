@@ -17,12 +17,12 @@ export type CustomerDatabasePackage={
 	payload:any;
 };
 
-const EXPECTED_REPO:Record<CustomerDatabaseComponent,string>={
-	base:'remipetrovich-design/OrbitFS-Base-System',
-	'engine-shared':'remipetrovich-design/OrbitFS_Engine',
-	mcp:'remipetrovich-design/OrbitFS_Engine',
-	apex:'remipetrovich-design/OrbitFS_Engine',
-	studio:'remipetrovich-design/OrbitFS_Engine'
+const EXPECTED_REPOS:Record<CustomerDatabaseComponent,readonly string[]>={
+	base:['lucaskerim123/Master-Database-System','remipetrovich-design/OrbitFS-Base-System'],
+	'engine-shared':['lucaskerim123/Master-Database-System','remipetrovich-design/OrbitFS_Engine'],
+	mcp:['lucaskerim123/Master-Database-System','remipetrovich-design/OrbitFS_Engine'],
+	apex:['lucaskerim123/Master-Database-System','remipetrovich-design/OrbitFS_Engine'],
+	studio:['lucaskerim123/Master-Database-System','remipetrovich-design/OrbitFS_Engine']
 };
 
 const MIGRATION_COMPONENT:Record<CustomerDatabaseComponent,string>={
@@ -68,7 +68,8 @@ function validatePackage(component:CustomerDatabaseComponent,row:any):CustomerDa
 	const payload=row?.payload;
 	if(!row||typeof row!=='object'||!payload||typeof payload!=='object'||Array.isArray(payload))throw fail('DATABASE_PACKAGE_INVALID');
 	if(String(row.component)!==component||String(row.databaseTarget)!=='customer')throw fail('DATABASE_PACKAGE_IDENTITY_MISMATCH');
-	if(String(row.sourceRepo)!==EXPECTED_REPO[component]||String(payload.sourceRepo)!==EXPECTED_REPO[component])throw fail('DATABASE_PACKAGE_SOURCE_INVALID');
+	const rowSourceRepo=String(row.sourceRepo),payloadSourceRepo=String(payload.sourceRepo);
+	if(rowSourceRepo!==payloadSourceRepo||!EXPECTED_REPOS[component].includes(rowSourceRepo))throw fail('DATABASE_PACKAGE_SOURCE_INVALID');
 	if(String(payload.format)!=='orbitfs-customer-database-package-v1'||Number(payload.packageVersion)!==1)throw fail('DATABASE_PACKAGE_FORMAT_INVALID');
 	if(String(payload.component)!==component||String(payload.databaseTarget)!=='customer')throw fail('DATABASE_PACKAGE_PAYLOAD_SCOPE_INVALID');
 	if(String(payload.sourceCommit)!==String(row.sourceCommit)||!/^[a-f0-9]{40}$/.test(String(row.sourceCommit||'')))throw fail('DATABASE_PACKAGE_SOURCE_COMMIT_INVALID');
