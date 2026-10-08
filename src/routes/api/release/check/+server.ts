@@ -2,6 +2,8 @@ import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { assertPanelLicensed, getStoredLicenseCredential } from '$lib/server/license';
 import { resolveUpdaterProviderBase } from '$lib/server/updater-connection';
+import { compareOrbitVersions } from '$lib/server/orbit-version';
+import { resolveInstalledBaseVersion } from '$lib/server/base-release-state';
 
 const timeoutMs=()=>Math.max(3000,Number(env.ORBITFS_LICENSE_TIMEOUT_MS||8000));
 
@@ -25,10 +27,11 @@ export async function GET({ url }) {
       .filter((release)=>!release?.review_status||String(release.review_status).toLowerCase()==='approved')
       .sort((a,b)=>new Date(b?.published_at||b?.created_at||0).getTime()-new Date(a?.published_at||a?.created_at||0).getTime());
     const latest=body?.release||candidates[0]||null;
-    const currentVersion=String(env.ORBITFS_APP_VERSION||'').trim()||null;
-    const semver=(value:unknown)=>{const match=String(value||'').trim().match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);return match?match.slice(1,4).map(Number):null;};
-    const compare=(a:unknown,b:unknown)=>{const av=semver(a),bv=semver(b);if(!av||!bv)return null;for(let i=0;i<3;i+=1){if(av[i]!==bv[i])return av[i]>bv[i]?1:-1;}return 0;};
-    const comparison=latest?.version&&currentVersion?compare(latest.version,currentVersion):null;
+    const currentVersion=await resolveInstalledBaseVersion();
+    // An Update has its own version stream. Never compare it against the installed Base version.
+    const comparison=type==='base'&&latest?.version&&currentVersion
+      ?compareOrbitVersions(latest.version,currentVersion)
+      :null;
     return json({
       ok:true,
       authority:'orbitfs-license-master-v2',

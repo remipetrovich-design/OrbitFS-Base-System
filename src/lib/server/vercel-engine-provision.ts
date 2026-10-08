@@ -4,6 +4,7 @@ import { configuredPanelUrl, getSharedEngineHostState, normalizeDomainHost, save
 import { fetchLatestEngineRelease, verifyEngineUpdaterRelease } from '$lib/server/engine-release-client';
 import { fetchAuthorizedEngineBranch, verifyAuthorizedEngineBranch } from '$lib/server/engine-branch-client';
 import { getVercelCredentials } from '$lib/server/vercel-connection';
+import { describeEngineDomainDns } from '$lib/server/engine-domain-dns';
 import { buildEngineUpdatePlan } from '$lib/server/engine-update-planner';
 import { createUpdateCheckpoint, getActiveRelease, setEngineActiveRelease } from '$lib/server/update-checkpoints';
 import { getLicenseProviderSettings, recordLicenseManagerCheckIn } from '$lib/server/license';
@@ -258,6 +259,62 @@ async function sharedEngineProjectDomains(projectId:string,token:string,teamId:s
 	return Array.isArray(result?.domains)?result.domains:[];
 }
 
+/** Read exact Vercel-recommended DNS targets and TXT ownership challenges for the installed Engine. */
+export async function getSharedEngineDomainDnsInstructions() {
+	const current=await getSharedEngineHostState(true);
+	if(current.domainMode!=='custom'||!current.domainName)return null;
+	const projectId=String(current.projectId||'').trim();
+	if(!projectId)throw fail('The Shared Engine project is not installed.',409,'ENGINE_HOST_NOT_DEPLOYED');
+	const {token,teamId}=await credentialsFrom();
+	if(!token)throw fail('Connect the owning Vercel account to read DNS records.',409,'VERCEL_TOKEN_REQUIRED');
+	const domain=normalizeDomainHost(current.domainName,'Engine custom domain');
+	const domains=await sharedEngineProjectDomains(projectId,token,teamId);
+	const entry=domains.find((item:any)=>String(item?.name||'').toLowerCase()===domain);
+	if(!entry)throw fail('The configured custom domain is not attached to the Shared Engine Vercel project.',409,'ENGINE_DOMAIN_NOT_ATTACHED');
+	const config=await vercelRequest(`/v6/domains/${encodeURIComponent(domain)}/config`,token,teamId,{}, {projectIdOrName:projectId});
+	return describeEngineDomainDns(domain,entry,config);
+}
+
+/** Only a verified Vercel domain with correct routing DNS may become the active Engine URL. */
+export async function refreshSharedEngineCustomDomainStatus() {
+	const current=await getSharedEngineHostState(true);
+	if(current.domainMode!=='custom'||!current.domainName)return {host:current,dns:null};
+	const projectId=String(current.projectId||'').trim();
+	const domain=normalizeDomainHost(current.domainName,'Engine custom domain');
+	const {token,teamId}=await credentialsFrom();
+	if(!token)throw fail('Connect the owning Vercel account to verify DNS records.',409,'VERCEL_TOKEN_REQUIRED');
+	let dns=await getSharedEngineDomainDnsInstructions();
+	let verificationError:string|null=null;
+	if(dns&&!dns.ownershipVerified) {
+		try {
+			await vercelRequest(`/v9/projects/${encodeURIComponent(projectId)}/domains/${encodeURIComponent(domain)}/verify`,token,teamId,{method:'POST'});
+		} catch(error:any) {
+			if(![400,404,409].includes(Number(error?.status||0)))throw error;
+			verificationError=String(error?.message||'DNS ownership verification is still pending.');
+		}
+		dns=await getSharedEngineDomainDnsInstructions();
+	}
+	if(!dns)throw fail('The custom domain DNS status is unavailable.',503,'ENGINE_DOMAIN_DNS_UNKNOWN');
+	const verified=dns.ready===true;
+	const generatedDomain=`${String(current.projectName||'').toLowerCase()}.vercel.app`;
+	const effectiveUrl=verified?`https://${domain}`:`https://${generatedDomain}`;
+	let host=current;
+	if(verified!==current.domainVerified||current.hostUrl!==effectiveUrl) {
+		host=await saveSharedEngineHostState({
+			domainVerified:verified,hostUrl:effectiveUrl,lastSyncAt:new Date().toISOString(),
+			lastError:verified?null:'Custom Engine domain is waiting for Vercel DNS verification.'
+		},current);
+		await recordLicenseManagerCheckIn({
+			action:'check_in',phase:'completed',product:'orbitfs_base',
+			productVersion:String(env.ORBITFS_APP_VERSION||'').trim()||null,
+			releaseId:current.releaseId,deploymentId:current.deploymentId,deploymentUrl:host.hostUrl,
+			projectId:current.projectId,projectName:current.projectName,
+			details:{deploymentProduct:'orbitfs_engine',engineHostUrl:host.hostUrl,mcpUrl:host.hostUrl?`${host.hostUrl}/mcp`:null,domainMode:'custom',domainName:domain,domainVerified:verified}
+		});
+	}
+	return {host,dns:{...dns,verificationError}};
+}
+
 function normalizeEngineVercelAlias(value:unknown){
 	const raw=String(value||'').trim().toLowerCase().replace(/^https?:\/\//,'').replace(/\/$/,'');
 	const candidate=raw.endsWith('.vercel.app')?raw:`${raw}.vercel.app`;
@@ -387,7 +444,9 @@ export async function configureSharedEngineDomain(input:Record<string,any>={}){
 	if(!entry){
 		entry=await vercelRequest(`/v10/projects/${encodeURIComponent(projectId)}/domains`,token,teamId,{method:'POST',body:JSON.stringify({name:domain})});
 	}
-	const verified=entry?.verified===true&&entry?.misconfigured!==true;
+	// Ownership verification alone is not enough: routing DNS must also be correctly configured.
+	const dnsConfig=await vercelRequest(`/v6/domains/${encodeURIComponent(domain)}/config`,token,teamId,{}, {projectIdOrName:projectId}).catch(()=>null);
+	const verified=describeEngineDomainDns(domain,entry,dnsConfig).ready;
 	const host=await saveSharedEngineHostState({
 		domainMode:'custom',domainName:domain,domainVerified:verified,
 		hostUrl:verified?`https://${domain}`:`https://${generatedDomain}`,

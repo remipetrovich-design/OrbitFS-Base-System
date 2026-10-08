@@ -26,6 +26,7 @@
 
 	let status = $state<DeploymentStatus|null>(null);
 	let baseRelease = $state<BaseReleaseCheck|null>(null);
+	let targetedUpdate = $state<BaseReleaseCheck|null>(null);
 	let checkpoints = $state<Checkpoint[]>([]);
 	let loading = $state(true);
 	let creatingCheckpoint = $state(false);
@@ -35,18 +36,30 @@
 	async function load() {
 		loading = true; error = ''; success = '';
 		try {
-			const [deployment, releaseResult, checkpointResult] = await Promise.all([
+			const [deployment, releaseResult, updateResult, checkpointResult] = await Promise.all([
 				api.get<DeploymentStatus>('/system/deployment-status'),
 				api.get<BaseReleaseCheck>('/release/check?type=base'),
+				api.get<BaseReleaseCheck>('/release/check?type=update').catch(() => null),
 				api.get<{ checkpoints: Checkpoint[] }>('/system/update-checkpoints')
 			]);
 			status = deployment;
 			baseRelease = releaseResult;
+			targetedUpdate = updateResult;
 			checkpoints = checkpointResult.checkpoints || [];
 		} catch (err) {
 			error = err instanceof ApiError ? err.message : 'Failed to load update status';
 		} finally { loading = false; }
 	}
+
+	const includesBasePatch = () => {
+		const current = targetedUpdate?.latest;
+		const components = Array.isArray(current?.components) ? current.components : Array.isArray(current?.manifest?.components) ? current.manifest.components : [];
+		return components.some((component:unknown) => String(component||'').trim().toLowerCase()==='base');
+	};
+	const entitledToBasePatch = () => {
+		const plan=targetedUpdate?.latest?.componentPlan;
+		return !plan || !Array.isArray(plan.executionComponents) || plan.executionComponents.includes('base');
+	};
 
 	async function createCheckpoint() {
 		creatingCheckpoint = true; error = ''; success = '';
@@ -83,11 +96,14 @@
 			<Card><CardHeader><CardTitle class="flex items-center gap-2"><Server class="size-4" />Installed Base</CardTitle><CardDescription>Version running on this installation</CardDescription></CardHeader>
 				<CardContent><Badge variant="secondary">{status.version || 'Unknown'}</Badge><p class="mt-2 text-xs text-muted-foreground">{status.environment} · {status.releaseChannel}</p></CardContent></Card>
 			<Card><CardHeader><CardTitle class="flex items-center gap-2"><Cloud class="size-4" />Published Base</CardTitle><CardDescription>Authoritative License Manager release</CardDescription></CardHeader>
-				<CardContent><Badge variant={baseRelease?.updateAvailable ? 'outline' : 'success'}>{baseRelease?.publishedVersion || 'Unavailable'}</Badge><p class="mt-2 text-xs text-muted-foreground">{baseRelease?.updateAvailable ? 'New Base release available' : 'Installed Base matches published release'}</p></CardContent></Card>
+				<CardContent><Badge variant={baseRelease?.updateAvailable ? 'outline' : 'success'}>{baseRelease?.publishedVersion || 'Unavailable'}</Badge><p class="mt-2 text-xs text-muted-foreground">{baseRelease?.updateAvailable===true ? 'New published Base release available' : baseRelease?.updateAvailable===false ? 'Installed Base matches published release' : 'Unable to determine Base version difference'}</p></CardContent></Card>
 			<Card><CardHeader><CardTitle class="flex items-center gap-2"><GitBranch class="size-4" />Registered project</CardTitle><CardDescription>Base updates redeploy this exact Vercel project</CardDescription></CardHeader>
 				<CardContent><Badge variant={status.baseUpdate.ready ? 'success' : 'outline'}>{status.baseUpdate.ready ? 'Ready' : 'Blocked'}</Badge><p class="mt-2 font-mono text-xs text-muted-foreground break-all">{status.projectId || 'Project ID not registered'}</p></CardContent></Card>
-			<Card><CardHeader><CardTitle class="flex items-center gap-2"><ShieldCheck class="size-4" />Base update path</CardTitle><CardDescription>Base + inner deployer ownership</CardDescription></CardHeader>
-				<CardContent><Badge variant="outline">Base Deployer / Updater</Badge><p class="mt-2 text-xs text-muted-foreground">Base releases update the Base system and the Base-owned inner deployer. MCP/APEX/Studio updates never carry Base files.</p></CardContent></Card>
+			<Card><CardHeader><CardTitle class="flex items-center gap-2"><ShieldCheck class="size-4" />Targeted Base Update</CardTitle><CardDescription>Latest published UPDATE_RELEASE package</CardDescription></CardHeader>
+				<CardContent>
+					<Badge variant={includesBasePatch()&&entitledToBasePatch()?'outline':'secondary'}>{includesBasePatch()?targetedUpdate?.publishedVersion||'Published':'Not included'}</Badge>
+					<p class="mt-2 text-xs text-muted-foreground">{includesBasePatch()?(entitledToBasePatch()?'Latest published Update declares a Base patch. The standalone Updater must verify its manifest, compatibility, checkpoint and release authority before applying.':'Published Update declares Base, but the licence execution plan does not authorize it for this installation.'):'Latest published Update does not include a Base patch.'}</p>
+				</CardContent></Card>
 		</div>
 
 		<Card>
@@ -143,7 +159,7 @@
 			<CardHeader><CardTitle>Release branches</CardTitle><CardDescription>Simple two-channel release model.</CardDescription></CardHeader>
 			<CardContent class="space-y-3 text-sm text-muted-foreground">
 				<div><b class="text-foreground">base-release</b> — controlled source for initial Base installs and later major Base updates. Published Base releases are delivered on <b class="text-foreground">{status.releaseChannel}</b> and must redeploy the registered Base Vercel project.</div>
-				<div><b class="text-foreground">UPDATE_RELEASE</b> — Engine/add-on updates only. It may target APEX, MCP and Studio, but never Base. The updater calls the Base-owned inner deployer to create or update the Shared Engine Host, including when no Engine is installed yet.</div>
+				<div><b class="text-foreground">UPDATE_RELEASE</b> — immutable targeted Update packages may include Base, APEX, MCP and Studio when explicitly declared and approved. The standalone OrbitFS Updater applies authorized Base patch payloads; the Base-owned inner deployer remains Engine/add-on-only and must not silently mutate Base files.</div>
 			</CardContent>
 		</Card>
 	{/if}

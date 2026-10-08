@@ -14,7 +14,9 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "db:snapshot": "node tools/build-customer-schema.mjs",
-    "check:versions": "node --experimental-strip-types tools/check-version-compatibility.mjs"
+    "check:versions": "node --experimental-strip-types tools/check-version-compatibility.mjs",
+    "test:addon-routes": "node --test tools/addon-lifecycle-route-smoke.mjs",
+    "test:engine-dns": "node --experimental-strip-types --test tools/engine-domain-dns.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

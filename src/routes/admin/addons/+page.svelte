@@ -18,7 +18,13 @@
 		updaterLastVerifiedAt?:string|null; updaterLastError?:string|null;
 		domainMode?:'generated'|'vercel'|'custom'; domainName?:string|null; domainVerified?:boolean;
 	};
-	type HostResponse = { host:Host; provisioningAvailable:boolean; provisioningMissing?:string[]; waiting?:boolean };
+	type EngineDomainDnsRecord = {type:'A'|'CNAME'|'TXT';name:string;hostname:string;value:string;purpose:'routing'|'verification'};
+	type EngineDomainDns = {
+		domain:string;apexName:string|null;ownershipVerified:boolean;dnsConfigured:boolean|null;
+		ready:boolean;records:EngineDomainDnsRecord[];hasRoutingRecommendation:boolean;
+		verificationError?:string|null;checkedAt:string;
+	};
+	type HostResponse = { host:Host; provisioningAvailable:boolean; provisioningMissing?:string[]; waiting?:boolean; dns?:EngineDomainDns|null };
 	type EngineUpdatePlan = {
 		status:'install'|'update'|'noop'|'blocked'; blocked:boolean; reason:string|null;
 		current?:{version:string|null;releaseId:string|null;fileCount:number}|null;
@@ -46,6 +52,10 @@
 	let engineDomainMode=$state<'generated'|'vercel'|'custom'>('generated');
 	let engineDomain=$state('');
 	let engineDomainAvailability=$state<{domain:string;available:boolean;attached?:boolean;reserved?:boolean;reason?:string|null}|null>(null);
+	let engineDomainDns=$state<EngineDomainDns|null>(null);
+	let engineDomainDnsError=$state('');
+	let engineDomainDnsLoading=$state(false);
+	let dnsCopyMessage=$state('');
 
 	const message=(e:unknown,fallback:string)=>e instanceof ApiError?`${e.message}${e.code?` (${e.code})`:''}`:fallback;
 	const hostReady=()=>['linked','ready'].includes(String(host?.state||''));
@@ -79,6 +89,9 @@
 			]);
 			addons=addonData.addons;
 			host=hostData.host;
+			if(host?.domainMode==='custom'&&host.domainName){
+				if(!engineDomainDns||engineDomainDns.domain!==host.domainName)void loadEngineDomainDns();
+			}else{engineDomainDns=null;engineDomainDnsError='';}
 			provisioningAvailable=hostData.provisioningAvailable;
 			provisioningMissing=hostData.provisioningMissing||[];
 			if(startPolling&&hostAdvancing()&&provisioningAvailable)void pollHost();
@@ -121,22 +134,42 @@
 		finally{ connectingVercel=false; }
 	}
 
+	async function loadEngineDomainDns(){
+		if(!host?.projectId||host.domainMode!=='custom'||!host.domainName){engineDomainDns=null;return;}
+		engineDomainDnsLoading=true;engineDomainDnsError='';
+		try{
+			const result=await api.get<{dns:EngineDomainDns|null}>('/engine-host/domain-dns');
+			engineDomainDns=result.dns||null;
+		}catch(e){engineDomainDns=null;engineDomainDnsError=message(e,'Unable to get DNS instructions from Vercel.');}
+		finally{engineDomainDnsLoading=false;}
+	}
+
+	async function copyDns(value:string){
+		try{await navigator.clipboard.writeText(value);dnsCopyMessage='Copied to clipboard.';}
+		catch{dnsCopyMessage='Select the record value and copy it manually.';}
+	}
+
 	function toggleEngineDomain(){
 		showEngineDomain=!showEngineDomain;
 		if(!showEngineDomain)return;
 		engineDomainMode=host?.domainMode==='custom'?'custom':host?.domainMode==='vercel'?'vercel':'generated';
 		engineDomain=host?.domainName||'';
-		engineDomainAvailability=engineDomainMode==='vercel'&&engineDomain?{domain:engineDomain,available:true,attached:true,reserved:true}:null;
+		engineDomainAvailability=engineDomainMode==='vercel'&&engineDomain?{domain:engineDomain,available:true,reserved:true,attached:true}:null;
+		if(engineDomainMode==='custom'&&!engineDomainDns&&!engineDomainDnsLoading)void loadEngineDomainDns();
 	}
 
 	async function refreshEngineDomain(){
 		if(!host?.projectId)return;
 		busy='host:domain'; error='';
 		try{
-			const data=await api.get<HostResponse>('/engine-host');
+			const data=host.domainMode==='custom'
+				?await api.post<HostResponse>('/engine-host/domain-refresh',{})
+				:await api.get<HostResponse>('/engine-host');
 			host=data.host;
 			provisioningAvailable=data.provisioningAvailable;
 			provisioningMissing=data.provisioningMissing||[];
+			if(host?.domainMode==='custom') {engineDomainDns=data.dns||null;engineDomainDnsError='';}
+			else {engineDomainDns=null;engineDomainDnsError='';}
 			if(host?.domainMode==='vercel'&&host.domainName)engineDomainAvailability={domain:host.domainName,available:true,attached:true,reserved:true};
 		}catch(e){ error=message(e,'Could not refresh Engine domain status'); }
 		finally{ busy=''; }
@@ -172,6 +205,8 @@
 			engineDomain=host?.domainName||'';
 			engineDomainAvailability=engineDomainMode==='vercel'&&engineDomain?{domain:engineDomain,available:true,attached:true,reserved:true}:null;
 			showEngineDomain=false;
+			if(host?.domainMode==='custom')await loadEngineDomainDns();
+			else {engineDomainDns=null;engineDomainDnsError='';}
 		}catch(e){ error=message(e,'Could not update the Engine address'); }
 		finally{ busy=''; }
 	}
@@ -221,7 +256,7 @@
 	async function addonAct(id:string,action:'install'|'link'|'unlink'|'test'){
 		busy=`${id}:${action}`; error='';
 		try{
-			const endpoint=action==='install'?`/addons/${id}/install`:`/addons/${id}/${action==='link'?'attach':action==='unlink'?'detach':action}`;
+			const endpoint=`/addon-library/${id}/${action}`;
 			const data=await api.post<any>(endpoint);
 			if(action==='install'&&data?.host){
 				host=data.host;
@@ -238,8 +273,8 @@
 		if(!confirm(`Uninstall ${addon?.name||id}? If linked, it will first be detached from the Shared Engine. Your database, addon data and files will be preserved.`))return;
 		busy=`${id}:remove`; error='';
 		try{
-			if(addon && recordAttached(addon)) await api.post(`/addons/${id}/detach`);
-			await api.delete(`/addons/${id}`);
+			if(addon && recordAttached(addon)) await api.post(`/addon-library/${id}/unlink`);
+			await api.delete(`/addon-library/${id}`);
 			await load(false);
 			await addonsStore.load();
 		}catch(e){ error=message(e,'Uninstall failed. No addon data was deleted.'); }
@@ -346,8 +381,54 @@
 								<strong>{engineDomainAvailability.available?'Available':'Unavailable'}:</strong> {engineDomainAvailability.domain}{engineDomainAvailability.available?(engineDomainAvailability.attached?' is already attached to this Engine project.':' is available and will only be claimed when you save.'):' is already in use on Vercel.'}
 							</p>
 						{/if}
+						{#if engineDomainMode==='custom'}
+							<p class="mt-2 text-xs text-muted-foreground">Save the domain first to attach it to the existing Vercel project. OrbitFS will then show exactly which DNS records to add at your DNS provider.</p>
+						{:else}
+							<p class="mt-2 text-xs text-muted-foreground">Generated and vercel.app addresses do not require DNS records at your domain registrar.</p>
+						{/if}
 						<p class="mt-2 text-xs text-muted-foreground">This changes the address on the existing Shared Engine Vercel project. It does not create a second Engine deployment.</p>
 						{/if}
+					</div>
+				{/if}
+				{#if host?.domainMode==='custom' && host.domainName}
+					<div class="rounded-lg border p-4 text-sm">
+						<div class="flex flex-wrap items-center justify-between gap-2">
+							<div><p class="font-semibold">DNS records for {host.domainName}</p><p class="mt-1 text-xs text-muted-foreground">Add these records at the company managing your domain's DNS, not in OrbitFS. Values are retrieved from Vercel for this Engine project.</p></div>
+							<Button variant="outline" size="sm" onclick={refreshEngineDomain} disabled={busy!==''}>{busy==='host:domain'?'Verifying…':'Check DNS & verify'}</Button>
+						</div>
+						{#if engineDomainDnsLoading}<p class="mt-3 text-xs text-muted-foreground">Loading exact DNS records from Vercel…</p>{/if}
+						{#if engineDomainDnsError}<p class="mt-3 text-xs text-destructive">{engineDomainDnsError}</p><p class="mt-1 text-xs text-muted-foreground">Open Configure, then Refresh domain to retry. No example DNS values have been substituted.</p>{/if}
+						{#if engineDomainDns}
+							<div class="mt-3 flex flex-wrap gap-2 text-xs">
+								<span class="rounded-md border px-2 py-1">Ownership: {engineDomainDns.ownershipVerified?'Verified':'Pending'}</span>
+								<span class="rounded-md border px-2 py-1">DNS routing: {engineDomainDns.dnsConfigured===true?'Configured':engineDomainDns.dnsConfigured===false?'Needs attention':'Not confirmed'}</span>
+								<span class="rounded-md border px-2 py-1">Custom address: {engineDomainDns.ready?'Ready':'Not ready'}</span>
+							</div>
+							{#if engineDomainDns.records.length}
+								<div class="mt-3 overflow-x-auto rounded-md border">
+									<table class="w-full min-w-[490px] text-left text-xs">
+										<thead class="bg-muted/40"><tr><th class="p-2">Type</th><th class="p-2">Name / Host</th><th class="p-2">Value / Target</th><th class="p-2">Copy</th></tr></thead>
+										<tbody>{#each engineDomainDns.records as record}
+											<tr class="border-t align-top">
+												<td class="p-2 font-semibold">{record.type}<div class="font-normal text-muted-foreground">{record.purpose==='verification'?'Verify ownership':'Route traffic'}</div></td>
+												<td class="p-2"><code class="break-all">{record.name}</code><div class="text-muted-foreground">Full: {record.hostname}</div></td>
+												<td class="p-2"><code class="break-all select-all">{record.value}</code></td>
+												<td class="p-2"><Button variant="outline" size="sm" onclick={()=>copyDns(record.value)}>Copy value</Button></td>
+											</tr>
+										{/each}</tbody>
+									</table>
+								</div>
+								<p class="mt-2 text-xs text-muted-foreground">At your DNS provider, select the listed Type and enter Name/Host and Value/Target exactly as shown. If your provider requires a fully qualified host, use the Full name under the record. Remove conflicting records for the same host and type only after checking what they currently serve.</p>
+							{/if}
+							{#if !engineDomainDns.hasRoutingRecommendation}
+								<p class="mt-3 text-xs text-destructive">Vercel has not returned a routing DNS value for this domain. Do not enter a guessed A or CNAME target. Check this project's Domains settings on Vercel, then retry.</p>
+							{/if}
+							{#if engineDomainDns.verificationError}<p class="mt-2 text-xs text-muted-foreground">Vercel verification: {engineDomainDns.verificationError}</p>{/if}
+							<p class="mt-2 text-xs text-muted-foreground">{engineDomainDns.ready?'Vercel confirms DNS routing and domain ownership.':'After adding the records, allow DNS to propagate, then press Check DNS & verify. The generated vercel.app address remains the fallback until verification succeeds.'}</p>
+						{:else if !engineDomainDnsLoading&&!engineDomainDnsError}
+							<p class="mt-3 text-xs text-muted-foreground">Press Check DNS & verify to fetch the records required by Vercel.</p>
+						{/if}
+						{#if dnsCopyMessage}<p class="mt-2 text-xs text-muted-foreground">{dnsCopyMessage}</p>{/if}
 					</div>
 				{/if}
 				{#if host?.lastError}<div class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{host.lastError}</div>{/if}

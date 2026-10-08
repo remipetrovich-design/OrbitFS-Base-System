@@ -6,7 +6,7 @@ import { isSystemAdmin } from '$lib/server/workspaces';
 import { writeAudit } from '$lib/server/audit';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 import { getSharedEngineHostState, saveSharedEngineHostState } from '$lib/server/engine-host-state';
-import { ENGINE_DEPLOYER_PROTOCOL, fetchEngineBootstrapRelease, assertInitialEngineRelease, inspectInstalledEngineDatabase, engineHostProvisioningStatus, provisionSharedEngineHost, refreshSharedEngineDeployment, registerSharedEngineUpdater, deleteRegisteredSharedEngineProject, scopeEngineReleaseForInstalledLicenses, configureSharedEngineDomain, checkSharedEngineVercelDomainAvailability } from '$lib/server/vercel-engine-provision';
+import { ENGINE_DEPLOYER_PROTOCOL, fetchEngineBootstrapRelease, assertInitialEngineRelease, inspectInstalledEngineDatabase, engineHostProvisioningStatus, provisionSharedEngineHost, refreshSharedEngineDeployment, registerSharedEngineUpdater, deleteRegisteredSharedEngineProject, scopeEngineReleaseForInstalledLicenses, configureSharedEngineDomain, checkSharedEngineVercelDomainAvailability, getSharedEngineDomainDnsInstructions, refreshSharedEngineCustomDomainStatus } from '$lib/server/vercel-engine-provision';
 import { confirmSharedEngineHostLink, confirmSharedEngineHostUnlink, readSharedEngineHostLink } from '$lib/server/engine-host-remote';
 import { getVercelConnectionSummary } from '$lib/server/vercel-connection';
 import { fetchAuthorizedEngineBranch } from '$lib/server/engine-branch-client';
@@ -171,6 +171,17 @@ async function advanceProvisionedHost(user:any, body:Record<string,any>={}) {
 	}
 }
 
+export async function GET({params,cookies}:any) {
+	try {
+		await context(cookies);
+		const action=String(params.action||'').trim().toLowerCase();
+		if(action==='domain-dns') {
+			return json({ok:true,dns:await getSharedEngineDomainDnsInstructions()},{headers:{'cache-control':'private, no-store'}});
+		}
+		return json({error:'Engine Host action not found',code:'ENGINE_HOST_ACTION_NOT_FOUND'},{status:404});
+	}catch(error){return fail(error);}
+}
+
 export async function POST({params,request,cookies}:any) {
 	try {
 		const user=await context(cookies);
@@ -241,6 +252,11 @@ export async function POST({params,request,cookies}:any) {
 			if(!current.hostUrl && !current.deploymentId) return json({ok:true,waiting:false,phase:'not_deployed',...await statusPayload()});
 			const advanced=await advanceProvisionedHost(user,body);
 			return json({ok:true,...advanced,...await statusPayload()});
+		}
+		if(action==='domain-refresh') {
+			const result=await refreshSharedEngineCustomDomainStatus();
+			await writeAudit({actorUserId:user.id,action:'engine_host.domain_refresh',targetType:'engine_host',targetId:String(result.host.projectId||''),detail:{domain:result.dns?.domain||null,verified:result.dns?.ready===true}});
+			return json({ok:true,dns:result.dns,...await statusPayload({host:result.host})},{headers:{'cache-control':'private, no-store'}});
 		}
 		if(action==='domain-check') {
 			const availability=await checkSharedEngineVercelDomainAvailability(body);
