@@ -1017,7 +1017,7 @@ export async function activateLicenseComponent(componentId:string){
 export async function assertPanelLicensed(){const s=await getPanelLicenseSummary();if(!s.licensed)throw Object.assign(new Error(s.reason||'Valid OrbitFS Base license required'),{status:403,code:s.reason||'LICENSE_REQUIRED'});return s;}
 export async function getLicenseProviderSettings(){
  const [official,providerBase]=await Promise.all([officialLicenseProviders(true),configuredProvider()]);
- return {providerBase,allowedProviderBases:official.map((row:any)=>row.base_url),officialConnections:official,configured:true,apiConfigured:true,apiTokenConfigured:false,mode:'license-master-v2',product:PANEL_COMPONENT,registryAuthority:TRUSTED_LICENSE_REGISTRY_ROOT};
+ return {providerBase,allowedProviderBases:[...new Set([providerBase,...official.map((row:any)=>row.base_url)])],officialConnections:official,configured:true,apiConfigured:true,apiTokenConfigured:false,mode:'license-master-v2',product:PANEL_COMPONENT,registryAuthority:TRUSTED_LICENSE_REGISTRY_ROOT};
 }
 export async function setLicenseProviderBase(value:string){
  const providerBase=await requireOfficialProviderBase(value);
