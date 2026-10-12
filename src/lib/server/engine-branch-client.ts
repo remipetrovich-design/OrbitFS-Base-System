@@ -29,6 +29,14 @@ export async function fetchAuthorizedEngineBranch(selection: { sourceCommit?: st
     accept: 'application/json',
   };
   const url = await sourceUrl();
+  // One Shared Engine Host per Base installation. Select the authorized
+  // repository from the trusted License Manager API origin, not the Base build.
+  const sourceRepo = url.hostname === 'lm.incendiarynetworks.cc'
+    ? 'remipetrovich-design/OrbitFS_Engine'
+    : url.hostname === 'incendiarynetworks.cc'
+      ? 'lucaskerim123/V1-vercel-engine'
+      : null;
+  if (!sourceRepo) throw fail('ENGINE_LICENSE_PROVIDER_INVALID', 503);
   const requested = String(selection.sourceCommit || '').trim().toLowerCase();
   if (requested) {
     if (!/^[a-f0-9]{40}$/.test(requested)) throw fail('ENGINE_SOURCE_SHA_INVALID', 400);
@@ -42,9 +50,9 @@ export async function fetchAuthorizedEngineBranch(selection: { sourceCommit?: st
   const sha = String(item.sourceCommit || '').trim().toLowerCase();
   const expected = String(item.checksum || '').trim().toLowerCase();
   if (!/^[a-f0-9]{40}$/.test(sha) || !/^[a-f0-9]{64}$/.test(expected) ||
-    String(item.sourceRepo) !== 'remipetrovich-design/OrbitFS_Engine' ||
+    String(item.sourceRepo) !== sourceRepo ||
     String(item.sourceRef) !== 'UPDATE_RELEASE' ||
-    String(item.id) !== 'github:remipetrovich-design/OrbitFS_Engine@' + sha)
+    String(item.id) !== 'github:' + sourceRepo + '@' + sha)
     throw fail('ENGINE_SOURCE_DESCRIPTOR_INVALID', 502);
   if (requested && requested !== sha) throw fail('ENGINE_SOURCE_STALE', 409);
   url.searchParams.set('sha', sha);
