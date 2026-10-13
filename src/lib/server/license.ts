@@ -95,8 +95,8 @@ async function requireOfficialProviderBase(value:string){
   return normalized;
 }
 let sourceModeCache:{value:string;expires:number}|null=null;
-async function activeSourceModeProvider():Promise<string|null>{
- if(sourceModeCache&&sourceModeCache.expires>Date.now())return sourceModeCache.value;
+async function activeSourceModeProvider(force=false):Promise<string|null>{
+ if(!force&&sourceModeCache&&sourceModeCache.expires>Date.now())return sourceModeCache.value;
  const endpoints=[
   'https://lm.incendiarynetworks.cc/api/v1/source-configuration',
   'https://incendiarynetworks.cc/api/v1/source-configuration'
@@ -115,8 +115,8 @@ async function activeSourceModeProvider():Promise<string|null>{
    return provider;
   }catch{}
  }
- // Retain the last verified authority during a discovery outage. Never
- // silently revert an installation that had already selected Fallback to Main.
+ // A forced refresh cannot report stale cache as successfully applied.
+ if(force)return null;
  return sourceModeCache?.value||null;
 }
 
@@ -864,8 +864,15 @@ export async function getPanelLicenseSummary(options:{refresh?:boolean;requireAu
   }
 
   const pendingDirectives=policy.pendingPulseDirectives;
+  const sourceRefreshDirectives=pendingDirectives.filter(d=>d.action==='refresh_authority');
 
   try{
+    if(sourceRefreshDirectives.length){
+      const verified=await activeSourceModeProvider(true);
+      if(!verified)throw Object.assign(new Error('Source mode could not be freshly verified'),{code:'SOURCE_MODE_REFRESH_FAILED',status:503});
+      officialProviderCache=null;
+      summaryCache=null;
+    }
     const result=await masterRequest('/validate',{method:'POST',body:JSON.stringify({
       action:'validate',
       license_key:currentLicenseKey,
@@ -889,6 +896,10 @@ export async function getPanelLicenseSummary(options:{refresh?:boolean;requireAu
     const reason=valid?null:String(authorityState(result)||result?.code||'LICENSE_INVALID');
     if(valid&&pendingDirectives.some((directive)=>directive.action==='request_check_in')){
       await recordLicenseManagerCheckIn({action:'check_in',phase:'completed',product:'orbitfs_base',productVersion:env.ORBITFS_APP_VERSION||'cloud',client:'orbitfs-base',clientVersion:env.ORBITFS_APP_VERSION||null,details:{source:'license-pulse'}});
+    }
+    if(sourceRefreshDirectives.length){
+      const source=await activeSourceModeProvider();
+      if(!source)throw Object.assign(new Error('Source mode missing after validation'),{code:'SOURCE_MODE_REFRESH_FAILED',status:503});
     }
     await acknowledgePulseDirectives(saved,i.id,pendingDirectives,'applied',String(result?.code||'LICENSE_VALID'),valid?'active':reason);
     return cacheSummary(makeSummary(saved,valid,reason));
