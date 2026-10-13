@@ -600,6 +600,13 @@ async function pollPulse(row:LicenseRow,installationId:string):Promise<{changed:
   if(Number.isFinite(checked)&&Date.now()-checked<policy.pulsePollSeconds*1000)return {changed:false,row};
 
   const checkedAt=new Date().toISOString();
+  // Poll the two fixed source-configuration URLs independently of /pulse.
+  // The old authority can be paused before this installation checks in;
+  // it must still discover the newly active API without customer action.
+  const previousProvider=sourceModeCache?.value||null;
+  const discoveredProvider=await activeSourceModeProvider(true);
+  const modeChanged=Boolean(discoveredProvider&&previousProvider&&discoveredProvider!==previousProvider);
+  if(modeChanged){ officialProviderCache=null; summaryCache=null; }
   try{
     const params=new URLSearchParams({
       installation_id:installationId,
@@ -616,7 +623,7 @@ async function pollPulse(row:LicenseRow,installationId:string):Promise<{changed:
       policy.pulseRevision===null||String(pulseData.revision)!==String(policy.pulseRevision)
     );
     const authorityChanged=Boolean(pulseState&&BLOCKING_STATES.has(pulseState));
-    const changed=directives.length>0||revisionChanged||authorityChanged;
+    const changed=directives.length>0||revisionChanged||authorityChanged||modeChanged;
     if(directives.length)await acknowledgePulseDirectives(row,installationId,directives,'received');
     const nextMetadata={
       ...m,
