@@ -1,5 +1,5 @@
 import { env } from '$env/dynamic/private';
-import { getStoredLicenseCredential } from '$lib/server/license';
+import { getStoredLicenseCredential, getLicenseProviderSettings } from '$lib/server/license';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 
 const SETTING_KEY = 'updater.connection';
@@ -77,7 +77,12 @@ function deriveUpdaterFromLicense(value: unknown) {
 	}
 }
 
-function automaticProvider() {
+async function automaticProvider() {
+	// In automatic mode the active License Manager is authoritative for both
+	// runtime validation and updater routing, including after refresh_authority.
+	const license = await getLicenseProviderSettings();
+	const active = deriveUpdaterFromLicense(license.providerBase);
+	if (active) return {providerBase: active, source: 'license_env' as const};
 	const explicit = String(env.ORBITFS_ENGINE_RELEASE_PROVIDER || '').trim();
 	if (explicit) return { providerBase: normalizeUpdaterProviderBase(explicit, 'ORBITFS_ENGINE_RELEASE_PROVIDER'), source: 'engine_env' as const };
 	const derived = deriveUpdaterFromLicense(env.ORBITFS_LICENSE_API_URL);
@@ -98,8 +103,8 @@ async function readStored() {
 	return objectValue(result.data?.value);
 }
 
-function resolvedFrom(stored: Record<string, any>): UpdaterConnectionSettings {
-	const automatic = automaticProvider();
+async function resolvedFrom(stored: Record<string, any>): Promise<UpdaterConnectionSettings> {
+	const automatic = await automaticProvider();
 	const manual = stored.manualProviderBase
 		? normalizeUpdaterProviderBase(stored.manualProviderBase, 'Manual updater URL')
 		: null;
@@ -122,15 +127,15 @@ function resolvedFrom(stored: Record<string, any>): UpdaterConnectionSettings {
 }
 
 export async function getUpdaterConnectionSettings() {
-	return resolvedFrom(await readStored());
+	return await resolvedFrom(await readStored());
 }
 
 export async function resolveUpdaterProviderBase() {
 	return (await getUpdaterConnectionSettings()).providerBase;
 }
 
-function candidateSettings(input: Record<string, any>, current: UpdaterConnectionSettings) {
-	const automatic = automaticProvider();
+async function candidateSettings(input: Record<string, any>, current: UpdaterConnectionSettings) {
+	const automatic = await automaticProvider();
 	const mode: UpdaterConnectionMode = input.mode === 'manual' ? 'manual' : 'auto';
 	const manual = mode === 'manual'
 		? normalizeUpdaterProviderBase(input.providerBase || input.manualProviderBase, 'Manual updater URL')
@@ -208,7 +213,7 @@ async function probe(providerBase: string) {
 
 export async function testUpdaterConnection(input: Record<string, any> = {}) {
 	const current = await getUpdaterConnectionSettings();
-	const candidate = Object.keys(input).length ? candidateSettings(input, current) : current;
+	const candidate = Object.keys(input).length ? await candidateSettings(input, current) : current;
 	const checked = await probe(candidate.providerBase);
 	return {
 		...candidate,
@@ -252,5 +257,5 @@ export async function saveUpdaterConnection(input: Record<string, any>) {
 		updated_at: value.updatedAt
 	}, { onConflict: 'scope_type,scope_id,key' });
 	if (result.error) throw result.error;
-	return resolvedFrom(value);
+	return await resolvedFrom(value);
 }
