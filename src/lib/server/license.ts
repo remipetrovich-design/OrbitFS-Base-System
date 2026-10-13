@@ -91,7 +91,7 @@ async function officialLicenseProviders(force=false){
 async function requireOfficialProviderBase(value:string){
   const normalized=normalizeProviderBase(value);
   const official=await officialLicenseProviders(true);
-  if(!official.some((row:any)=>String(row.base_url)===normalized))throw Object.assign(new Error('That URL is not an enabled official OrbitFS licence API.'),{status:400,code:'LICENSE_PROVIDER_NOT_OFFICIAL'});
+  if(!['https://incendiarynetworks.cc/api/v1/license','https://lm.incendiarynetworks.cc/api/v1/license'].includes(normalized)&&!official.some((row:any)=>String(row.base_url)===normalized))throw Object.assign(new Error('That URL is not an enabled official OrbitFS licence API.'),{status:400,code:'LICENSE_PROVIDER_NOT_OFFICIAL'});
   return normalized;
 }
 let sourceModeCache:{value:string;expires:number}|null=null;
@@ -1039,7 +1039,7 @@ export async function activateLicenseComponent(componentId:string){
 export async function assertPanelLicensed(){const s=await getPanelLicenseSummary();if(!s.licensed)throw Object.assign(new Error(s.reason||'Valid OrbitFS Base license required'),{status:403,code:s.reason||'LICENSE_REQUIRED'});return s;}
 export async function getLicenseProviderSettings(){
  const [official,providerBase]=await Promise.all([officialLicenseProviders(true),configuredProvider()]);
- return {providerBase,allowedProviderBases:[...new Set([providerBase,...official.map((row:any)=>row.base_url)])],officialConnections:official,configured:true,apiConfigured:true,apiTokenConfigured:false,mode:'license-master-v2',product:PANEL_COMPONENT,registryAuthority:TRUSTED_LICENSE_REGISTRY_ROOT};
+ return {providerBase,allowedProviderBases:[...new Set([providerBase,'https://incendiarynetworks.cc/api/v1/license','https://lm.incendiarynetworks.cc/api/v1/license'])],officialConnections:official,configured:true,apiConfigured:true,apiTokenConfigured:false,mode:'license-master-v2',product:PANEL_COMPONENT,registryAuthority:TRUSTED_LICENSE_REGISTRY_ROOT};
 }
 export async function setLicenseProviderBase(value:string){
  const providerBase=await requireOfficialProviderBase(value);
