@@ -1,3 +1,4 @@
+import {emitDiagnostic} from '$lib/incendiary-diagnostic';
 import { randomUUID } from 'node:crypto';
 import https from 'node:https';
 import { env } from '$env/dynamic/private';
@@ -74,7 +75,9 @@ async function officialLicenseProviders(force=false){
   try{
     const url=new URL(TRUSTED_LICENSE_REGISTRY_ROOT+'/api-connections');
     url.searchParams.set('client','v1_base');url.searchParams.set('service','license_runtime');
-    const response=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(5000)});
+    const start=Date.now(); const request_id=randomUUID();
+const response=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(5000)});
+emitDiagnostic({direction:'egress',source_system:'base',target:'license_manager',account_mode:'fallback',method:'GET',endpoint:url.replace(/^https?:\/\/[^/]+/,''),status:response.status,request_id,latency_ms:Date.now()-start,error:null});
     if(response.ok){
       const body=await response.json().catch(()=>({}));
       connections=(Array.isArray(body?.connections)?body.connections:[])
