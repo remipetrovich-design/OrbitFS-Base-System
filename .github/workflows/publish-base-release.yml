@@ -359,7 +359,7 @@ jobs:
           normalized="$(RAW_LICENSE_MASTER_URL="$RAW_LICENSE_MASTER_URL" node - <<'NODE'
           const raw=String(process.env.RAW_LICENSE_MASTER_URL||'').trim();
           const u=new URL(raw);
-          if(u.protocol!=='https:'||u.hostname!=='incendiarynetworks.cc'||u.search||u.hash)throw new Error('LICENSE_MASTER_URL must point to https://incendiarynetworks.cc');
+          if(u.protocol!=='https:'||u.hostname!=='panel.incendiarynetworks.cc'||u.search||u.hash)throw new Error('LICENSE_MASTER_URL must point to https://panel.incendiarynetworks.cc');
           let path=u.pathname.replace(/\/+$/,'');
           if(path==='/api')path='/api/v1';
           if(path!=='/api/v1')throw new Error('LICENSE_MASTER_URL path must be /api or /api/v1');
