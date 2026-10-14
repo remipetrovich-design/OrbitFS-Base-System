@@ -55,10 +55,20 @@ export async function POST({params,cookies}:any){
 				return json({ok:true,addon,host:null});
 			}
 			const previousMode=String(row.runtime?.engineMode||'');
+			// A new installation must not inherit setup completion or review metadata
+			// from an earlier installation stored in the shared add-on registry.
+			const priorConfig=row.config&&typeof row.config==='object'?row.config:{};
+			const {engineSetup:_previousEngineSetup,...freshConfig}=priorConfig;
+			const freshRuntime={...(row.runtime||{})};
+			delete freshRuntime.lastSetupAt;
+			delete freshRuntime.lastSetupBy;
+			delete freshRuntime.setupCompletedAt;
+			delete freshRuntime.setupCompletedBy;
 			await saveCloudAddon(id,{
 				installed:false,attached:false,configured:false,status:'installing',installed_at:null,
+				config:{...freshConfig,engineSetup:{state:'required',version:1,configurationReviewedAt:null,configurationReviewedByUserId:null}},
 				transport_path:row.transport_path??manifest.transportPath??null,
-				runtime:{...(row.runtime||{}),mode:'engine-host',engineMode:id==='mcp'?(previousMode==='stopped'?'stopped':'running'):(previousMode||defaultEngineMode(id)),setupState:row.runtime?.setupState||'not_started',pendingInstall:true,desiredInstalled:true,installState:'provisioning',installRequestedAt:new Date().toISOString(),installRequestedByUserId:String(user.id),autoAttachPending:true,lastManualDetachAt:null,compute:'vercel',database:'shared-panel',online:false}
+				runtime:{...freshRuntime,mode:'engine-host',engineMode:id==='mcp'?(previousMode==='stopped'?'stopped':'running'):(previousMode||defaultEngineMode(id)),setupState:'required',setupVersion:1,pendingInstall:true,desiredInstalled:true,installState:'provisioning',installRequestedAt:new Date().toISOString(),installRequestedByUserId:String(user.id),autoAttachPending:true,lastManualDetachAt:null,compute:'vercel',database:'shared-panel',online:false}
 			});
 			let provisioned:any=null;
 			try{
