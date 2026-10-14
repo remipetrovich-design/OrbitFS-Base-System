@@ -108,7 +108,7 @@ jobs:
         shell: bash
         env:
           RAW_LICENSE_MASTER_URL: https://panel.incendiarynetworks.cc/api/v1
-          LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
+          LICENSE_MASTER_API_TOKEN: ${{ secrets.FALLBACK_LICENSE_MASTER_API_TOKEN || secrets.LICENSE_MASTER_API_TOKEN }}
         run: |
           set -euo pipefail
           test -n "$LICENSE_MASTER_API_TOKEN" || { echo "::error::Missing LICENSE_MASTER_API_TOKEN repository secret."; exit 1; }
@@ -373,7 +373,7 @@ jobs:
         if: steps.profile.outputs.run == 'true'
         env:
           LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
-          LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
+          LICENSE_MASTER_API_TOKEN: ${{ secrets.FALLBACK_LICENSE_MASTER_API_TOKEN || secrets.LICENSE_MASTER_API_TOKEN }}
           CHANNEL: ${{ inputs.channel }}
         shell: bash
         run: |
@@ -413,7 +413,7 @@ jobs:
         id: master-release
         env:
           LICENSE_MASTER_URL: ${{ steps.license-master.outputs.url }}
-          LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
+          LICENSE_MASTER_API_TOKEN: ${{ secrets.FALLBACK_LICENSE_MASTER_API_TOKEN || secrets.LICENSE_MASTER_API_TOKEN }}
           VERSION: ${{ inputs.version }}
           CHANNEL: ${{ inputs.channel }}
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -500,7 +500,7 @@ jobs:
         if: steps.profile.outputs.run == 'true'
         env:
           LICENSE_MASTER_URL: ${{ needs.candidate.outputs.license_master_url }}
-          LICENSE_MASTER_API_TOKEN: ${{ secrets.LICENSE_MASTER_API_TOKEN }}
+          LICENSE_MASTER_API_TOKEN: ${{ secrets.FALLBACK_LICENSE_MASTER_API_TOKEN || secrets.LICENSE_MASTER_API_TOKEN }}
           RELEASE_ID: ${{ needs.candidate.outputs.release_id }}
         shell: bash
         run: |
