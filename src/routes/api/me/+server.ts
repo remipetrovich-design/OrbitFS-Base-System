@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { hashPassword, requireUser } from '$lib/server/auth';
+import { requireUser } from '$lib/server/auth';
 import { assertPanelLicensed } from '$lib/server/license';
 import { getSupabaseAdmin } from '$lib/server/supabase';
 import { writeAudit } from '$lib/server/audit';
@@ -32,15 +32,14 @@ export async function PATCH({ request, cookies }) {
 			if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error:'Enter a valid email address' }, { status:400 });
 			patch.email = email;
 		}
-		if (body.pin !== undefined) {
-			const pin = String(body.pin ?? '');
-			if (!/^\d{4,10}$/.test(pin)) return json({ error:'PIN must be 4-10 digits' }, { status:400 });
-			patch.password_hash = hashPassword(pin); patch.must_change_pin = false;
+		if (body.pin !== undefined || body.password !== undefined || body.newPassword !== undefined) {
+			return json({ error:'Change your password from Account using your current password.' }, { status:400 });
 		}
+		if (!Object.keys(patch).length) return json({ error:'No account changes supplied' }, { status:400 });
 		const supabase = getSupabaseAdmin();
 		const updated = await supabase.from('orbitfs_users').update(patch).eq('id',user.id).select('*').single();
 		if (updated.error) throw updated.error;
-		await writeAudit({ actorUserId:user.id,action:'account.update',targetType:'user',targetId:user.id,detail:{ emailChanged:body.email !== undefined,pinChanged:body.pin !== undefined } });
+		await writeAudit({ actorUserId:user.id,action:'account.update',targetType:'user',targetId:user.id,detail:{ emailChanged:body.email !== undefined } });
 		return json({ user:await present(updated.data) });
 	} catch (error:any) { return json({ error:String(error?.message || 'Failed to update account') }, { status:Number(error?.status || 500) }); }
 }

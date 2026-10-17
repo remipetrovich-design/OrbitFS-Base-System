@@ -34,7 +34,7 @@ export async function POST({ request, cookies }) {
 		const newPassword = String(body.newPassword ?? '');
 		if (newPassword.length < 8 || newPassword.length > 128 || !/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword)) return json({ error: 'New password must be 8-128 characters and include a letter and number' }, { status: 400 });
 		const { data: row, error: lookupError } = await supabase.from('orbitfs_users').select('password_hash').eq('id', user.id).single();
-		if (lookupError || !row || !verifyPassword(currentPassword, row.password_hash)) return json({ error: 'Current password is incorrect' }, { status: 401 });
+		if (lookupError || !row || !verifyPassword(currentPassword, row.password_hash)) return json({ error: 'Current password is incorrect', code: 'CURRENT_PASSWORD_INCORRECT' }, { status: 400 });
 		const { error } = await supabase.from('orbitfs_users').update({ password_hash: hashPassword(newPassword) }).eq('id', user.id);
 		if (error) return json({ error: error.message }, { status: 500 });
 		await writeAudit({ actorUserId: user.id, action, targetType: 'user', targetId: user.id });

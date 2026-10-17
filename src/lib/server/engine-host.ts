@@ -178,7 +178,7 @@ export async function controlEngine(addonId: string, action: 'running' | 'standb
 	const db = getSupabaseAdmin();
 	const current = await getEngineStatus(addonId);
 	if (!current.linked || !current.attached) throw Object.assign(new Error('Attach the engine to the Shared Engine Host first.'), { status: 409, code: 'ENGINE_NOT_ATTACHED' });
-	if (!current.configured) throw Object.assign(new Error('Complete engine setup before changing runtime mode.'), { status: 409, code: 'ENGINE_SETUP_REQUIRED' });
+	if (!current.configured && !(addonId === 'mcp' && action === 'running')) throw Object.assign(new Error('Complete engine setup before changing runtime mode.'), { status: 409, code: 'ENGINE_SETUP_REQUIRED' });
 	const { data: row, error: readError } = await db.from('orbitfs_addons').select('runtime').eq('id', addonId).maybeSingle();
 	if (readError) throw readError;
 	const runtime = runtimeOf(row?.runtime);

@@ -22,11 +22,12 @@
 	let emailError = $state('');
 	let emailSaved = $state(false);
 
-	let newPin = $state('');
-	let confirmPin = $state('');
-	let pinSaving = $state(false);
-	let pinError = $state('');
-	let pinSaved = $state(false);
+	let currentPassword = $state('');
+	let newPassword = $state('');
+	let confirmPassword = $state('');
+	let passwordSaving = $state(false);
+	let passwordError = $state('');
+	let passwordSaved = $state(false);
 
 	async function load() {
 		loading = true;
@@ -60,30 +61,36 @@
 		}
 	}
 
-	async function savePin(e: Event) {
+	async function savePassword(e: Event) {
 		e.preventDefault();
-		pinError = '';
-		pinSaved = false;
-		if (!/^\d{4,10}$/.test(newPin)) {
-			pinError = 'PIN must be 4-10 digits';
+		passwordError = '';
+		passwordSaved = false;
+		if (!currentPassword) {
+			passwordError = 'Enter your current password';
 			return;
 		}
-		if (newPin !== confirmPin) {
-			pinError = "PINs don't match";
+		if (newPassword.length < 8 || newPassword.length > 128 || !/[A-Za-z]/.test(newPassword) || !/\\d/.test(newPassword)) {
+			passwordError = 'Password must be 8-128 characters and include a letter and number';
 			return;
 		}
-		pinSaving = true;
+		if (newPassword !== confirmPassword) {
+			passwordError = "Passwords don't match";
+			return;
+		}
+		passwordSaving = true;
 		try {
-			await api.patch('/me', { pin: newPin });
-			newPin = '';
-			confirmPin = '';
-			pinSaved = true;
+			await api.post('/account', { action: 'password.change', currentPassword, newPassword });
+			currentPassword = '';
+			newPassword = '';
+			confirmPassword = '';
+			passwordSaved = true;
 		} catch (err) {
-			pinError = err instanceof ApiError ? err.message : 'Save failed';
+			passwordError = err instanceof ApiError ? err.message : 'Password update failed';
 		} finally {
-			pinSaving = false;
+			passwordSaving = false;
 		}
 	}
+
 </script>
 
 <div class="mx-auto max-w-xl space-y-6 p-4 md:p-6">
@@ -158,27 +165,31 @@
 			<CardHeader>
 				<CardTitle class="flex items-center gap-2">
 					<Lock class="size-4 text-muted-foreground" />
-					Change PIN
+					Change password
 				</CardTitle>
-				<CardDescription>4-10 digits.</CardDescription>
+				<CardDescription>8-128 characters, including a letter and a number.</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<form class="space-y-3" onsubmit={savePin}>
+				<form class="space-y-3" onsubmit={savePassword}>
+					<div class="space-y-1.5">
+						<label for="current-password" class="text-sm font-medium">Current password</label>
+						<Input id="current-password" type="password" autocomplete="current-password" bind:value={currentPassword} required />
+					</div>
 					<div class="grid gap-3 sm:grid-cols-2">
 						<div class="space-y-1.5">
-							<label for="new-pin" class="text-sm font-medium">New PIN</label>
-							<Input id="new-pin" type="password" bind:value={newPin} />
+							<label for="new-password" class="text-sm font-medium">New password</label>
+							<Input id="new-password" type="password" autocomplete="new-password" bind:value={newPassword} minlength={8} maxlength={128} required />
 						</div>
 						<div class="space-y-1.5">
-							<label for="confirm-pin" class="text-sm font-medium">Confirm PIN</label>
-							<Input id="confirm-pin" type="password" bind:value={confirmPin} />
+							<label for="confirm-password" class="text-sm font-medium">Confirm password</label>
+							<Input id="confirm-password" type="password" autocomplete="new-password" bind:value={confirmPassword} minlength={8} maxlength={128} required />
 						</div>
 					</div>
-					{#if pinError}<p class="text-sm text-destructive">{pinError}</p>{/if}
-					{#if pinSaved}<p class="text-sm text-success">PIN updated.</p>{/if}
-					<Button type="submit" size="sm" disabled={pinSaving}>
-						{#if pinSaving}<LoaderCircle class="size-4 animate-spin" />{:else}<Save />{/if}
-						Update PIN
+					{#if passwordError}<p class="text-sm text-destructive">{passwordError}</p>{/if}
+					{#if passwordSaved}<p class="text-sm text-success">Password updated.</p>{/if}
+					<Button type="submit" size="sm" disabled={passwordSaving}>
+						{#if passwordSaving}<LoaderCircle class="size-4 animate-spin" />{:else}<Save />{/if}
+						Update password
 					</Button>
 				</form>
 			</CardContent>
